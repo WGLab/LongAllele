@@ -12,8 +12,8 @@ LongAllele is a statistical framework for haplotype-resolved allelic analysis fo
 ## Installation
 
 ```bash
-git clone https://github.com/Karenxzr/sc_ase.git
-cd sc_ase
+git clone https://github.com/WGLab/LongAllele.git
+cd LongAllele
 # Recommended: a fresh Python 3.9+ environment (conda or venv)
 pip install -r requirements.txt
 ```
