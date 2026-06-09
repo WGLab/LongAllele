@@ -118,6 +118,30 @@ A `step1_job{N}.done` marker is written to `{output_folder}/job_markers/` for ea
 
 </details>
 
+### Step 1.5 — Read-block collection *(optional)*
+
+This step collects per-read CIGAR block information from the BAM, enabling the `obs_*` raw-read validation columns in `event_snv.csv` (step 5 output). It is **not required** for core ASE/ASTU analysis — skip it if you do not need raw-read event validation.
+
+Run as a two-part task: a per-sample array followed by a single merge job.
+
+```bash
+# Part 1 — per-sample array (one task per BAM; run after step 1)
+python src/longallele.py --task step1_5 \
+    --scotch_target /path/to/scotch_output \
+    --bam_path /path/to/aligned.bam \
+    --output_folder /path/to/results \
+    --n_jobs N_SAMPLES --job_index $SLURM_ARRAY_TASK_ID
+
+# Part 2 — merge (single job; run after part 1 array completes)
+python src/longallele.py --task step1_5_merge \
+    --scotch_target /path/to/scotch_output \
+    --output_folder /path/to/results
+```
+
+`longallele.sh` handles both parts automatically (run in parallel with step 2, output ready before step 5).
+
+---
+
 ### Step 2 — EM input generation
 This step prepares the per-gene read profile and error profile used as input by the EM in step 3.
 
@@ -500,12 +524,6 @@ python src/longallele.py --task check \
 ```
 
 </details>
-
-### Note: `obs_*` validation columns
-
-`longallele.sh` automatically handles read-block collection (`--task step1_5` / `step1_5_merge`) as part of the submitted job graph — no extra action needed. These tasks run in parallel with step 2 and their output is ready before step 5 starts.
-
-If running steps manually (without `longallele.sh`), see the [step 1.5 tasks](#configurable-arguments-3) in the Pipeline section for the two-part collection commands.
 
 ## Citation
 
