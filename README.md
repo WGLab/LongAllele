@@ -88,27 +88,25 @@ python src/longallele.py --task step1 \
 
 ## Pipeline
 
-LongAllele consists of five core steps plus an optional step 1.5. The pipeline takes an aligned BAM and reference FASTA (with [SCOTCH](https://github.com/WGLab/SCOTCH) read-to-isoform mappings as upstream input) and produces per-gene haplotype statistics, haplotype-aware count matrices (gene- and isoform-levels), and downstream allelic effect-size and SNV–event linkage tables. Each step below documents its task, parallelization, outputs, and (folded) configurable arguments.
+LongAllele consists of five sequential steps. The pipeline takes an aligned BAM and reference FASTA (with [SCOTCH](https://github.com/WGLab/SCOTCH) read-to-isoform mappings as upstream input) and produces per-gene haplotype statistics, haplotype-aware count matrices (gene- and isoform-levels), and downstream allelic effect-size and SNV–event linkage tables. Each step below documents its task, parallelization, outputs, and (folded) configurable arguments.
 
 All genomic positions in LongAllele outputs use **0-based** coordinates.
 
 ```
 BAM + FASTA
     ↓
-SCOTCH  ─────────────────────────────────────────────────────┐
-    ↓ (read→gene/isoform mappings)                           │
-Step 1:   Variant calling (initial SNV candidates)           │
-  ↓  ↘ (optional — one SLURM task per BAM)                   │
-  │   Step 1.5: Read-block collection ─────────────────────┐ │
-  ↓  ↙ (merge; enables obs_* columns in step 5)            │ │
-Step 2:   EM input generation (per-gene read×SNV tables)   │ │
-    ↓                                                       │ │
-Step 3:   EM haplotyping (read→haplotype assignments)       │ │
-    ↓                                                       │ │
-Step 4:   Summary statistics + count matrices               │ │
-    ↓                                                       │ │
-Step 5:   Downstream analysis ◄────────────────────────────┘ │
-          (effect sizes, SNV–event linkage) ◄─────────────────┘
+SCOTCH  ───────────────────────────────────────────────┐
+    ↓ (read→gene/isoform mappings)                     │
+Step 1: Variant calling (initial SNV candidates)       │
+    ↓                                                  │
+Step 2: EM input generation (per-gene read×SNV tables) │
+    ↓                                                  │
+Step 3: EM haplotyping (read→haplotype assignments)    │
+    ↓                                                  │
+Step 4: Summary statistics + count matrices            │
+    ↓                                                  │
+Step 5: Downstream analysis ◄──────────────────────────┘
+        (effect sizes, SNV–event linkage)
 ```
 
 ### Step 1 — Variant calling
@@ -155,55 +153,6 @@ SLURM array parallelized across genes. Add `--n_jobs N --job_index $SLURM_ARRAY_
 <summary><b>Job completion</b></summary>
 
 A `step1_job{N}.done` marker is written to `{output_folder}/job_markers/` for each successful array task. After the array finishes, `ls {output_folder}/job_markers/step1_*.done | wc -l` should equal `--n_jobs`.
-
-</details>
-
-### Step 1.5 — Read-block collection *(optional; enables `obs_*` outputs in step 5)*
-This step performs a single-pass BAM fetch to record per-read CIGAR alignment blocks for each gene. The resulting per-gene `read_blocks.pkl` cache is consumed by step 5 to compute the CIGAR-observed (`obs_*`) columns in `event_snv.csv`. Without this step, `obs_test_type` is `no_bam` and all `obs_*` fields are `None`.
-
-Step 1.5 is independent of steps 2–4 and can run in parallel with them. Run the merge task before starting step 5.
-
-<details open>
-<summary><b>Parallelization</b></summary>
-
-Two-part execution:
-
-1. **Per-BAM array** (`--task step1_5`): one SLURM task per BAM, fanned out with `--n_jobs N_SAMPLES --job_index $SLURM_ARRAY_TASK_ID`. Each task scans one BAM and writes per-gene intermediate files `{geneID}_read_blocks_{job_index}.pkl`.
-2. **Merge** (`--task step1_5_merge`): a single task that unions all per-sample intermediates into the canonical `{geneID}_read_blocks.pkl` consumed by step 5, then removes the intermediates.
-
-</details>
-
-<details>
-<summary><b>Configurable arguments</b></summary>
-
-**`--task step1_5` (per-BAM array)**
-
-| Parameter | Description |
-|---|---|
-| `--task` | `step1_5` |
-| `--scotch_target` | Path(s) to SCOTCH output directory |
-| `--bam_path` | Aligned BAM file(s) |
-| `--ref_fasta_path` | Reference genome FASTA |
-| `--output_folder` | Output directory |
-| `--n_jobs` | **Must equal number of samples** (one task per BAM) |
-| `--job_index` | Sample index (`$SLURM_ARRAY_TASK_ID`) |
-
-All variant-calling filters (`--depth`, `--n_alt_count`, `--heterozygous_filter`, etc.) are inherited — use the same values as step 1.
-
-**`--task step1_5_merge` (single merge task)**
-
-| Parameter | Description |
-|---|---|
-| `--task` | `step1_5_merge` |
-| `--scotch_target` | Path(s) to SCOTCH output directory |
-| `--output_folder` | Output directory |
-
-</details>
-
-<details open>
-<summary><b>Job completion</b></summary>
-
-A `step1_5_job{N}.done` marker is written per BAM task. After all per-BAM tasks finish, run the merge (`--task step1_5_merge`), which writes `step1_5_merge.done`. Step 5 will automatically detect and use the merged cache.
 
 </details>
 
@@ -587,6 +536,32 @@ python src/longallele.py --task check \
     --output_folder /path/to/results \
     --n_jobs 50
 ```
+
+</details>
+
+### Optional — Read-block collection (enables `obs_*` validation columns)
+
+<details>
+<summary>Expand for details</summary>
+
+By default, the `obs_*` columns in `event_snv.csv` (CIGAR-observed haplotype-event tests) are `None`. To populate them, run this two-part optional step **after step 1 and before step 5**:
+
+```bash
+# Part 1 — one SLURM task per BAM (--n_jobs must equal number of samples)
+python src/longallele.py --task step1_5 \
+    --scotch_target /path/to/scotch_output \
+    --bam_path      /path/to/aligned.bam \
+    --ref_fasta_path /path/to/genome.fa \
+    --output_folder /path/to/results \
+    --n_jobs N_SAMPLES --job_index $SLURM_ARRAY_TASK_ID
+
+# Part 2 — single merge task (run after all Part 1 tasks finish)
+python src/longallele.py --task step1_5_merge \
+    --scotch_target /path/to/scotch_output \
+    --output_folder /path/to/results
+```
+
+This step is independent of steps 2–4 and can run in parallel with them. Step 5 will automatically detect and use the merged cache once `step1_5_merge.done` exists.
 
 </details>
 
