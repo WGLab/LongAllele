@@ -200,7 +200,7 @@ SLURM array parallelized across genes (same `--n_jobs N` as steps 1–2). Add `-
 | Parameter | Description | Default |
 |---|---|---|
 | `--prefix` | Output filename prefix | none |
-| `--cell_type_df_path` | CSV with `Cell` / `CellType` columns for per-cell-type analysis | none |
+| `--cell_type_df_path` | CSV with `Cell` / `CellType` columns for per-cell-type analysis ([example](docs/example_cell_type_df.csv)). `Cell` values must match the cell barcodes in SCOTCH's `all_read_isoform_exon_mapping.tsv`. | none |
 | `--gene_subset_path` | Restrict to subset of genes | none |
 | `--rna_editing_db` | A-to-I editing DB (`.npz`); override only for non-hg38 | bundled hg38 |
 | `--snv_confidence_path` | Pre-defined high-confidence SNV set; skips noise filters | none |
