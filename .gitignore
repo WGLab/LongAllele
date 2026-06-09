@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.DS_Store
+*.swp
+*.bam
+*.bai
+*.pkl
+*.pkl.gz
+*.h5ad

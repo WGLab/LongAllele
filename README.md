@@ -1,13 +1,20 @@
-# LongAllele
-
-**Haplotype-resolved allele-specific expression and transcript usage from long-read RNA sequencing.**
-
-LongAllele is a statistical framework for haplotype-resolved allelic analysis for long-read RNA sequencing data, supporting both bulk and single-cell level. From aligned BAM files, it jointly infers heterozygous variants and read-haplotype alignments through an expectation–maximization (EM) algorithm, and quantifies allele-specific expression (ASE), allele-specific transcript usage (ASTU), and local haplotype-associated exon and junction events (HAEU / HAJU).
+<p align="center">
+  <img src="repo/logo.png" alt="LongAllele — a joint inference framework for allele-specific analysis on long-read bulk and single-cell RNA sequencing" width="600">
+</p>
 
 <p align="center">
-  <img src="figures/Figure1/figure1.png" alt="LongAllele framework" width="600">
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.9%2B-blue" alt="Python"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="#citation"><img src="https://img.shields.io/badge/preprint-coming%20soon-lightgrey" alt="Preprint"></a>
 </p>
-<p align="center"><em>LongAllele framework. <b>(a, b)</b> Phasability-aware joint EM inference of heterozygous SNVs and read-haplotype assignments. <b>(c)</b> Four allelic test layers: ASE, ASTU, HAEU, HAJU. <b>(d)</b> Within-individual <i>cis</i>-regulatory dissection.</em></p>
+
+Allele-specific analysis from RNA-seq is a powerful approach to characterize *cis*-regulatory effects. However, existing methods remain limited in both haplotype inference and allelic testing. Their haplotype-inference workflows separate variant calling, haplotype phasing, and read-haplotype assignment into sequential steps, failing to fully exploit within-read single-nucleotide variant (SNV) linkage information and propagating errors into downstream allelic analysis. At the testing stage, they ignore non-phasable reads lacking heterozygous SNVs, biasing calls and inflating false positives, and remain incomplete across gene-, isoform-, and local-event-level variant effects.
+
+Here, we present **LongAllele**, a statistical framework that employs an expectation–maximization algorithm to jointly infer heterozygous variants, haplotype structure, and read-haplotype assignments from long-read bulk and single-cell RNA sequencing. LongAllele further introduces **phasability-aware testing** that explicitly accounts for non-phasable reads, avoiding inflated false-positive calls when haplotype information is incomplete. It also enables **comprehensive allelic testing** across gene-level allele-specific expression (**ASE**), isoform-level allele-specific transcript usage (**ASTU**), and local-event-level haplotype-associated exon and junction usage (**HAEU** and **HAJU**), providing a multi-scale view of *cis*-regulation. LongAllele offers a unified framework for haplotype-resolved *cis*-regulatory analysis across diverse cellular contexts.
+
+<p align="center">
+  <img src="assets/figure1.png" alt="LongAllele overview" width="900">
+</p>
 
 ## Installation
 
@@ -18,327 +25,591 @@ cd LongAllele
 pip install -r requirements.txt
 ```
 
-**Upstream dependency:** [SCOTCH](https://github.com/WGLab/SCOTCH) — required to produce the `scotch_target` directory consumed by LongAllele.
+**Upstream dependency:** [SCOTCH](https://github.com/WGLab/SCOTCH) is required to produce the `scotch_target` directory consumed by LongAllele. 
 
-Tested on Python 3.9+ / Linux. A pinned `environment.yml` will be added in an upcoming release.
+## Quickstart
 
-## Pipeline overview
+Below shows the **minimum arguments** required for each of five `--task` steps. See [Pipeline](#pipeline) session for more details.
 
-LongAllele runs as a five-step pipeline on top of [SCOTCH](https://github.com/WGLab/SCOTCH) read-to-isoform mappings. Steps 1–3 are typically launched as SLURM job arrays for parallelism across genes; steps 4–5 are single jobs.
 
+```bash
+# ── Step 1: variant calling ─────────────────────────────────────
+python src/longallele.py --task step1 \
+    --scotch_target  /path/to/scotch_output `# SCOTCH output dir — all steps` \
+    --bam_path       /path/to/aligned.bam   `# aligned BAM — steps 1/2/3/5` \
+    --ref_fasta_path /path/to/genome.fa     `# reference FASTA — steps 1/2/3` \
+    --output_folder  /path/to/results       `# output dir — all steps`
+
+# ── Step 2: EM input generation ─────────────────────────────────
+python src/longallele.py --task step2 \
+    --scotch_target  /path/to/scotch_output \
+    --bam_path       /path/to/aligned.bam   \
+    --ref_fasta_path /path/to/genome.fa     \
+    --output_folder  /path/to/results
+
+# ── Step 3: EM haplotyping ──────────────────────────────────────
+python src/longallele.py --task step3 \
+    --scotch_target  /path/to/scotch_output \
+    --bam_path       /path/to/aligned.bam   \
+    --ref_fasta_path /path/to/genome.fa     \
+    --output_folder  /path/to/results       \
+    --clf_init                              `# strongly recommended for real data — use SNV classifier scores to initialize h_m`
+# Note: --rna_editing_db defaults to the bundled src/rna_editing_hg38.npz;
+# override only when running on a non-hg38 reference.
+
+# ── Step 4: summary statistics + count matrix ───────────────────
+python src/longallele.py --task step4 \
+    --scotch_target /path/to/scotch_output \
+    --output_folder /path/to/results       \
+    --summary_haplotype  `# write per-gene summary_statistics.csv — step 4 only` \
+    --summary_count      `# write per-gene count matrices — step 4 only`
+
+# ── Step 5: downstream analysis (effect sizes + SNV–event linkage) ─
+python src/longallele.py --task step5 \
+    --scotch_target /path/to/scotch_output \
+    --bam_path      /path/to/aligned.bam   `# required for raw SNV–event chi-squared (Tier 1–4 interpretation)` \
+    --output_folder /path/to/results
+
+# ── Inspect the final outputs ───────────────────────────────────
+head /path/to/results/downstream_/gene_snv.csv
+head /path/to/results/downstream_/event_snv.csv
 ```
-BAM + FASTA
-    ↓
-SCOTCH  ──────────────────────────────────────────────┐
-    ↓ (read→gene/isoform mappings)                    │
-Step 1: Variant calling (initial SNV candidates)      │
-    ↓                                                  │
-Step 2: EM input generation (per-gene read×SNV tables)│
-    ↓                                                  │
-Step 3: EM haplotyping (read→haplotype assignments)   │
-    ↓                                                  │
-Step 4: Summary statistics + count matrices           │
-    ↓                                                  │
-Step 5: Downstream analysis ◄─────────────────────────┘
-        (effect sizes, SNV–event linkage)
+
+**Multi-sample-analysis** — Similarly with SCOTCH, LongAllele allows batch analysis for multiple samples. Set `--scotch_target`, `--bam_path`, and `--sample_names` to run all 5 steps jointly across samples. For steps 4 and 5, add `--job_array_by_sample --job_index $SLURM_ARRAY_TASK_ID` to fan out one sample per array task. Example as below.
+
+```bash
+python src/longallele.py --task step1 \
+    --scotch_target /path/to/scotch/sample1 /path/to/scotch/sample2 \
+    --bam_path      /path/to/sample1.bam   /path/to/sample2.bam \
+    --sample_names  sample1 sample2 \
+    --ref_fasta_path /path/to/genome.fa \
+    --output_folder /path/to/results
 ```
 
 ## Pipeline
 
-All steps are invoked via `src/longallele.py --task <stepN>`.
+LongAllele consists of five core steps plus an optional step 1.5. The pipeline takes an aligned BAM and reference FASTA (with [SCOTCH](https://github.com/WGLab/SCOTCH) read-to-isoform mappings as upstream input) and produces per-gene haplotype statistics, haplotype-aware count matrices (gene- and isoform-levels), and downstream allelic effect-size and SNV–event linkage tables. Each step below documents its task, parallelization, outputs, and (folded) configurable arguments.
 
-### Inputs
+All genomic positions in LongAllele outputs use **0-based** coordinates.
 
-| Path | Provided by | Used in steps |
-|------|-------------|---------------|
-| `--scotch_target` directory | [SCOTCH](https://github.com/WGLab/SCOTCH) preprocessing | All steps |
-| `--bam_path` aligned BAM file(s) | User alignment | Steps 1, 2, 5 |
-| `--ref_fasta_path` reference FASTA | User | Steps 1–3 |
-| `--cell_type_df_path` cell-type CSV (`Cell`, `CellType`) | User (optional) | Steps 3–5 |
-
-Within `--scotch_target`, LongAllele reads two files:
-
-- `reference/geneStructureInformationupdated.pkl` — gene / isoform structure (fallbacks: `metageneStructureInformationwnovel.pkl`, `geneStructureInformation.pkl`, `metageneStructureInformation.pkl`)
-- `auxillary/all_read_isoform_exon_mapping.tsv` — per-read gene / isoform assignments; only rows with `Keep==1` are used
+```
+BAM + FASTA
+    ↓
+SCOTCH  ─────────────────────────────────────────────────────┐
+    ↓ (read→gene/isoform mappings)                           │
+Step 1:   Variant calling (initial SNV candidates)           │
+  ↓  ↘ (optional — one SLURM task per BAM)                   │
+  │   Step 1.5: Read-block collection ─────────────────────┐ │
+  ↓  ↙ (merge; enables obs_* columns in step 5)            │ │
+Step 2:   EM input generation (per-gene read×SNV tables)   │ │
+    ↓                                                       │ │
+Step 3:   EM haplotyping (read→haplotype assignments)       │ │
+    ↓                                                       │ │
+Step 4:   Summary statistics + count matrices               │ │
+    ↓                                                       │ │
+Step 5:   Downstream analysis ◄────────────────────────────┘ │
+          (effect sizes, SNV–event linkage) ◄─────────────────┘
+```
 
 ### Step 1 — Variant calling
+This step generates initial heterozygous SNV candidates from per-gene pileup of the aligned BAM.
 
-```bash
-#!/bin/bash
-#SBATCH --job-name=la_step1
-#SBATCH --array=0-49          # job array: 1 CPU per task, 50 tasks
-#SBATCH --cpus-per-task=1
-#SBATCH --mem=8G
-#SBATCH --output=logs/step1_%a.out
+<details open>
+<summary><b>Parallelization</b></summary>
 
-python src/longallele.py --task step1 \
-    --scotch_target /path/to/scotch \
-    --bam_path /path/to/sample.bam \
-    --ref_fasta_path /path/to/genome.fa \
-    --output_folder /results \
-    --n_jobs 50 --job_index $SLURM_ARRAY_TASK_ID
-```
+SLURM array parallelized across genes. Add `--n_jobs N --job_index $SLURM_ARRAY_TASK_ID` to fan out across array tasks.
 
-### Step 2 — EM input generation
+</details>
 
-```bash
-#!/bin/bash
-#SBATCH --job-name=la_step2
-#SBATCH --array=0-49          # job array: 1 CPU per task, 50 tasks
-#SBATCH --cpus-per-task=1
-#SBATCH --mem=8G
-#SBATCH --output=logs/step2_%a.out
+<details>
+<summary><b>Configurable arguments</b></summary>
 
-python src/longallele.py --task step2 \
-    --scotch_target /path/to/scotch \
-    --bam_path /path/to/sample.bam \
-    --ref_fasta_path /path/to/genome.fa \
-    --output_folder /results \
-    --n_jobs 50 --job_index $SLURM_ARRAY_TASK_ID
-```
+**Required**
 
-### Step 3 — Haplotyping (EM)
+| Parameter | Description |
+|---|---|
+| `--task` | `step1` |
+| `--scotch_target` | Path(s) to SCOTCH output directory (space-separated for multi-sample) |
+| `--bam_path` | Aligned BAM file(s) (space-separated for multi-sample) |
+| `--ref_fasta_path` | Reference genome FASTA |
+| `--output_folder` | Output directory |
 
-```bash
-#!/bin/bash
-#SBATCH --job-name=la_step3
-#SBATCH --array=0-49          # job array: 1 CPU per task, 50 tasks
-#SBATCH --cpus-per-task=1
-#SBATCH --mem=16G             # increase if OOM-killed
-#SBATCH --output=logs/step3_%a.out
-
-python src/longallele.py --task step3 \
-    --scotch_target /path/to/scotch \
-    --output_folder /results \
-    --n_jobs 50 --job_index $SLURM_ARRAY_TASK_ID \
-    --seed 42 --max_iter 50 --tol 1e-3 \
-    --rna_editing_db src/rna_editing_hg38.npz
-
-# Verify after all tasks finish:
-# ls /results/job_markers/step3_*.done | wc -l   # should equal 50
-```
-
-### Step 4 — Summary statistics and count matrix
-
-```bash
-#!/bin/bash
-#SBATCH --job-name=la_step4
-#SBATCH --cpus-per-task=1     # single job, no array
-#SBATCH --mem=16G
-#SBATCH --output=logs/step4.out
-
-python src/longallele.py --task step4 \
-    --scotch_target /path/to/scotch \
-    --output_folder /results \
-    --summary_haplotype --summary_count
-```
-
-### Step 5 — Downstream analysis
-
-```bash
-#!/bin/bash
-#SBATCH --job-name=la_step5
-#SBATCH --cpus-per-task=16    # single job, multiple CPUs — set --n_workers to match
-#SBATCH --mem=32G
-#SBATCH --output=logs/step5.out
-
-python src/longallele.py --task step5 \
-    --scotch_target /path/to/scotch \
-    --output_folder /results \
-    --bam_path /path/to/sample.bam \
-    --event_min_reads 10 \
-    --snv_event_distance 50 \
-    --n_workers 16 \
-    --astu_sig_only --astu_sig_threshold 0.05
-```
-
-### Job completion markers
-
-Markers are written to `{output_folder}/job_markers/` so that array runs can be verified before launching downstream steps:
-
-| File | Written when |
-|------|-------------|
-| `step1_job{N}.done` | Step 1 job N completed successfully |
-| `step2_job{N}.done` | Step 2 job N completed successfully |
-| `step3_job{N}.done` | Step 3 job N completed successfully |
-| `step4.done` | Step 4 completed successfully |
-| `step5.done` | Step 5 completed successfully |
-
-## Common workflows
-
-### Multi-sample analysis
-
-Pass multiple SCOTCH directories and BAM files together:
-
-```bash
-python src/longallele.py --task step1 \
-    --scotch_target /scotch/sample1 /scotch/sample2 \
-    --bam_path sample1.bam sample2.bam \
-    --sample_names sample1 sample2 \
-    --output_folder /results \
-    --n_jobs 10 --job_index 0
-```
-
-### Cell-type-specific analysis
-
-Provide a CSV with `Cell` and `CellType` columns to get per-cell-type haplotype assignments, isoform tables, and downstream statistics:
-
-```bash
-python src/longallele.py --task step3 \
-    ... \
-    --cell_type_df_path cell_types.csv
-```
-
-Step 5 will automatically detect available cell types from the summary statistics and run all downstream analyses per cell type in addition to bulk.
-
-### Haplotype-split BAM utility
-
-Generate per-sample, per-cell-type, per-haplotype BAM files for a single gene (useful for sashimi plots and IGV visualization):
-
-```bash
-python src/generate_gene_hap_bam.py \
-    --gene_name CLU \
-    --scotch_target /path/to/scotch \
-    --bam_path /path/to/aligned.bam \
-    --longallele_path /path/to/longallele/output \
-    --celltype_csv /path/to/celltype.csv \
-    --output_dir /output/CLU_bam \
-    --sample_id sample1 \
-    --prefix snvfilter
-```
-
-Outputs `{gene}_{sample}_{celltype}_{hapA/hapB}.bam` files sorted and indexed. The `--prefix` argument should match the prefix used during Step 3 haplotyping (omit if no prefix was used).
-
-## Configuration
-
-### Key parameters
+**Optional**
 
 | Parameter | Description | Default |
-|-----------|-------------|---------|
-| `--scotch_target` | Path(s) to SCOTCH output directory | required |
-| `--bam_path` | Input BAM file(s) | required for steps 1–2 |
-| `--ref_fasta_path` | Reference genome FASTA | required for steps 1–3 |
-| `--output_folder` | Output directory | required |
-| `--n_jobs` | Total number of parallel jobs | 1 |
-| `--job_index` | This job's index (0-based) | 0 |
-| `--prefix` | Prefix for output file names | none |
-| `--seed` | Random seed for EM | 42 |
-| `--depth` | Minimum read depth for SNV calling | 5 |
-| `--n_alt_count` | Minimum alt-allele count | 1 |
+|---|---|---|
+| `--depth` | Minimum read depth at SNV position | 20 |
+| `--n_alt_count` | Minimum alt-allele read count | 10 |
+| `--min_mapq` | Minimum mapping quality | 20 |
+| `--min_baseq` | Minimum base quality | 5 |
+| `--min_dist_to_end` | Minimum distance from read end | 3 |
+| `--prefix` | Output filename prefix | none |
+| `--gene_subset_path` | Restrict to subset of genes (one ID per line) | none |
+| `--sample_names` / `--sample_name_parse` | Multi-sample naming overrides | auto |
+| `--ref_pickle_path` | Pre-built reference pickle | auto |
+| `--n_jobs` / `--job_index` | Array parallelization | 1 / 0 |
+
+</details>
+
+<details open>
+<summary><b>Job completion</b></summary>
+
+A `step1_job{N}.done` marker is written to `{output_folder}/job_markers/` for each successful array task. After the array finishes, `ls {output_folder}/job_markers/step1_*.done | wc -l` should equal `--n_jobs`.
+
+</details>
+
+### Step 1.5 — Read-block collection *(optional; enables `obs_*` outputs in step 5)*
+This step performs a single-pass BAM fetch to record per-read CIGAR alignment blocks for each gene. The resulting per-gene `read_blocks.pkl` cache is consumed by step 5 to compute the CIGAR-observed (`obs_*`) columns in `event_snv.csv`. Without this step, `obs_test_type` is `no_bam` and all `obs_*` fields are `None`.
+
+Step 1.5 is independent of steps 2–4 and can run in parallel with them. Run the merge task before starting step 5.
+
+<details open>
+<summary><b>Parallelization</b></summary>
+
+Two-part execution:
+
+1. **Per-BAM array** (`--task step1_5`): one SLURM task per BAM, fanned out with `--n_jobs N_SAMPLES --job_index $SLURM_ARRAY_TASK_ID`. Each task scans one BAM and writes per-gene intermediate files `{geneID}_read_blocks_{job_index}.pkl`.
+2. **Merge** (`--task step1_5_merge`): a single task that unions all per-sample intermediates into the canonical `{geneID}_read_blocks.pkl` consumed by step 5, then removes the intermediates.
+
+</details>
+
+<details>
+<summary><b>Configurable arguments</b></summary>
+
+**`--task step1_5` (per-BAM array)**
+
+| Parameter | Description |
+|---|---|
+| `--task` | `step1_5` |
+| `--scotch_target` | Path(s) to SCOTCH output directory |
+| `--bam_path` | Aligned BAM file(s) |
+| `--ref_fasta_path` | Reference genome FASTA |
+| `--output_folder` | Output directory |
+| `--n_jobs` | **Must equal number of samples** (one task per BAM) |
+| `--job_index` | Sample index (`$SLURM_ARRAY_TASK_ID`) |
+
+All variant-calling filters (`--depth`, `--n_alt_count`, `--heterozygous_filter`, etc.) are inherited — use the same values as step 1.
+
+**`--task step1_5_merge` (single merge task)**
+
+| Parameter | Description |
+|---|---|
+| `--task` | `step1_5_merge` |
+| `--scotch_target` | Path(s) to SCOTCH output directory |
+| `--output_folder` | Output directory |
+
+</details>
+
+<details open>
+<summary><b>Job completion</b></summary>
+
+A `step1_5_job{N}.done` marker is written per BAM task. After all per-BAM tasks finish, run the merge (`--task step1_5_merge`), which writes `step1_5_merge.done`. Step 5 will automatically detect and use the merged cache.
+
+</details>
+
+### Step 2 — EM input generation
+This step prepares the per-gene read profile and error profile used as input by the EM in step 3.
+
+<details open>
+<summary><b>Parallelization</b></summary>
+
+SLURM array parallelized across genes (use the same `--n_jobs N` size as step 1). Add `--n_jobs N --job_index $SLURM_ARRAY_TASK_ID`.
+
+</details>
+
+<details>
+<summary><b>Configurable arguments</b></summary>
+
+**Required** — same as Step 1 (`--task step2`, `--scotch_target`, `--bam_path`, `--ref_fasta_path`, `--output_folder`).
+
+**Optional** — same set as Step 1.
+
+</details>
+
+<details open>
+<summary><b>Job completion</b></summary>
+
+A `step2_job{N}.done` marker is written to `{output_folder}/job_markers/` for each successful array task. After the array finishes, `ls {output_folder}/job_markers/step2_*.done | wc -l` should equal `--n_jobs`.
+
+</details>
+
+### Step 3 — EM haplotyping
+This step jointly infers heterozygous variants, haplotype structure, and read–haplotype assignment per gene via expectation–maximization.
+
+<details open>
+<summary><b>Parallelization</b></summary>
+
+SLURM array parallelized across genes (same `--n_jobs N` as steps 1–2). Add `--n_jobs N --job_index $SLURM_ARRAY_TASK_ID`.
+
+</details>
+
+<details>
+<summary><b>Configurable arguments</b></summary>
+
+**Required**
+
+| Parameter | Description |
+|---|---|
+| `--task` | `step3` |
+| `--scotch_target` | Path(s) to SCOTCH output directory |
+| `--bam_path` | Aligned BAM file(s) |
+| `--ref_fasta_path` | Reference genome FASTA |
+| `--output_folder` | Output directory |
+
+**Common optional**
+
+| Parameter | Description | Default |
+|---|---|---|
+| `--prefix` | Output filename prefix | none |
+| `--cell_type_df_path` | CSV with `Cell` / `CellType` columns for per-cell-type analysis | none |
+| `--gene_subset_path` | Restrict to subset of genes | none |
+| `--rna_editing_db` | A-to-I editing DB (`.npz`); override only for non-hg38 | bundled hg38 |
+| `--snv_confidence_path` | Pre-defined high-confidence SNV set; skips noise filters | none |
+| `--n_jobs` / `--job_index` | Array parallelization | 1 / 0 |
+| `--mtx` / `--csv` | Per-cell count matrix output format | csv |
+
+#### EM tuning
+
+| Parameter | Description | Default |
+|---|---|---|
+| `--seed` | Random seed for EM initialization | 42 |
+| `--max_iter` | Maximum EM iterations per gene | 50 |
+| `--tol` | Convergence tolerance (parameter delta) | 1e-3 |
 | `--heterozygous_filter` | Heterozygosity probability threshold | 0.99 |
-| `--het_fallback` | Enable stepped fallback for het filter (see below) | off |
-| `--cell_type_df_path` | CSV(s) with `Cell` and `CellType` columns for per-cell-type analysis | none |
-| `--gene_subset_path` | Plain-text file (one gene ID per line) to restrict analysis to a subset of genes | none |
-| `--snv_confidence_path` | Pre-defined high-confidence SNV set (TSV); skips all noise filters when provided | none |
-| `--rna_editing_db` | Compact RNA editing database (`.npz`) for filtering known A-to-I editing sites | `src/rna_editing_hg38.npz` |
-| `--repeat_filter_kmer` | Max k-mer size for repeat filtering (0=off, 1=homopolymer, 2=+dinuc, 3=+trinuc) | 1 |
+| `--het_fallback` | Stepped het-threshold descent | off |
 
-### SNV noise filtering
+When `--het_fallback` is enabled, the threshold decreases by 0.05 iteratively down to 0.5; the first step yielding any passing SNVs is used, capped at `ceil(6.6 × exon_length / 1000)` per gene. Intended for simulated / low-coverage data; off by default for real high-coverage data.
 
-Before EM haplotyping, LongAllele applies several filters to remove candidate SNVs that are likely noise rather than true heterozygous variants. These filters are skipped when `--snv_confidence_path` is provided (user supplies pre-called confident SNVs).
+#### SNV noise filtering (pre-EM)
 
-| Filter | What it removes | Key parameter |
-|--------|----------------|---------------|
-| Heterozygous probability | Homozygous sites (binomial model) | `--heterozygous_filter` (default 0.99) |
-| Low-complexity repeat | Artifacts in homopolymer/tandem repeat regions | `--alt_stretch_filter` (default 20), `--repeat_filter_kmer` (default 1) |
-| RNA editing (A-to-I) | Known editing sites from REDIportal v3 | `--rna_editing_db` |
-| Variant cluster | Dense variant clusters (>=3 SNVs within 20bp) | `--var_cluster_window`, `--var_cluster_n` |
+Skipped entirely when `--snv_confidence_path` is provided.
 
-#### Heterozygous filter and fallback (`--het_fallback`)
+| Filter | What it removes | Parameter | Default |
+|---|---|---|---|
+| Heterozygous probability | Homozygous sites (binomial model) | `--heterozygous_filter` | 0.99 |
+| Low-complexity repeat | Homopolymer / dinuc / trinuc repeats | `--repeat_filter_kmer` | 1 |
+| Long alt stretch | Long repeat artifacts | `--alt_stretch_filter` | 50 |
+| Variant cluster | Dense SNV runs (escape: `alt_count ≥ --alt_cluster_filter` is kept) | `--var_cluster_window` / `--var_cluster_n` / `--alt_cluster_filter` | 20 bp / 3 SNVs / 150 |
+| RNA editing | Known A-to-I editing sites (REDIportal v3) | `--rna_editing_db` | bundled hg38 |
 
-By default, SNVs with heterozygous probability below `--heterozygous_filter` (0.99) are discarded. If no SNVs in a gene pass the threshold, the gene is skipped entirely.
-
-When `--het_fallback` is enabled, a stepped descent is used instead: the threshold decreases by 0.05 iteratively down to a floor of 0.5. The first step that yields any passing SNVs is used, capped at the per-gene density limit (`ceil(6.6 × exon_length / 1000)`). This is intended for simulated data where the candidate pool contains fewer spurious variants and true heterozygous sites may have lower het_prob due to moderate coverage. For real data, the fallback is off by default because high sequencing depth causes homozygous-alternative and error sites to pass depth thresholds, and the strict filter appropriately excludes them.
-
-#### Repeat filter control (`--repeat_filter_kmer`)
-
-The low-complexity repeat filter flags SNVs in tandem repeat regions. The `--repeat_filter_kmer` parameter controls which repeat sizes are checked:
+`--repeat_filter_kmer` controls which repeat sizes are checked:
 
 | Value | Behavior | Recommended for |
-|-------|----------|-----------------|
-| `0` | Disable all repeat filtering | When using pre-called confident SNVs |
-| **`1`** (default) | **Homopolymer only** (single base ≥5 consecutive) | General use — safe default |
-| `2` | + Dinucleotide repeats (≥3 copies, e.g., ACACAC) | Stricter filtering |
-| `3` | + Trinucleotide repeats (≥3 copies, e.g., AAGAAGAAG) | Most aggressive — may remove real variants in codon repeats |
+|---|---|---|
+| `0` | Disabled | Pre-called confident SNV input |
+| **`1`** (default) | Homopolymer (≥5 consecutive single base) | General use |
+| `2` | + Dinucleotide repeats (≥3 copies, e.g. `ACACAC`) | Stricter filtering |
+| `3` | + Trinucleotide repeats (≥3 copies, e.g. `AAGAAGAAG`) | Most aggressive |
 
-**Note:** Trinucleotide repeat filtering (`--repeat_filter_kmer 3`) should be used with caution. Synonymous SNVs in codon repeats can be genuine heterozygous variants with functional effects on splicing regulation (e.g., disrupting exonic splicing enhancers near splice boundaries).
+⚠️ Trinucleotide filtering can remove genuine heterozygous variants in synonymous codon repeats with functional splicing effects.
 
-### RNA editing database
+The bundled RNA editing database is derived from [REDIportal v3](https://rediportal.cloud.ba.infn.it/) (15.7 M sites, hg38, 24 MB, 0-based, per-chromosome sorted arrays for `np.searchsorted` lookup). Override `--rna_editing_db` only for non-hg38 references.
 
-A-to-I RNA editing (by ADAR enzymes) produces A-to-G changes that can masquerade as heterozygous SNVs, particularly at 20–80 % editing levels where the allele ratio closely resembles a true het variant. LongAllele ships a compact database derived from [REDIportal v3](https://rediportal.cloud.ba.infn.it/) (15.7 M sites, hg38, 24 MB):
+#### Advanced — SNV classifier (optional)
+
+Pre-EM classifier-based filtering. Train a classifier on validated SNV calls and apply scores to filter or initialize haplotype priors.
+
+| Parameter | Description | Default |
+|---|---|---|
+| `--snv_classifier` | Path to serialized classifier (`.joblib`) | none |
+| `--clf_hard_threshold` | Drop SNVs below this classifier score | 0.05 |
+| `--clf_init` | Use classifier scores to initialize `h_m` in EM. **Strongly recommended to set for real data.** | off |
+| `--gap_tau` | Gap threshold for `adaptive_keep_mask` (1.0 = disabled) | 1.0 |
+| `--clf_pruning_threshold` | Score below which SNVs are considered low-quality | 0.1 |
+| `--clf_pruning_frac` | Max fraction of low-quality SNVs allowed (1.0 = no pruning) | 1.0 |
+
+#### Advanced — High-artifact mode (snRNA-seq nascent-RNA leak)
+
+Single-nucleus RNA-seq libraries can contain substantial unspliced pre-mRNA (nascent-RNA leak). In long-read snRNA-seq, intron-dominated reads have ambiguous isoform origin and introduce artifacts into haplotype phasing. High-artifact mode (`--high_artifact_mode`) is an opt-in opt that adds two disabled-by-default filters to mitigate this. Default OFF; output is byte-identical to the standard pipeline when disabled.
+
+- **SNV-level filter.** LongAllele uses both exonic and intronic SNVs as phasing markers by default. In high-artifact mode, SNVs in read-dense intronic regions of high-leak genes are excluded (controlled by `--novel_exon_pct_max`), preventing nascent intronic allelic biases from distorting read–haplotype assignment for mature transcripts.
+- **Read-level filter.** Reads whose alignments lie predominantly within introns are also excluded (controlled by `--read_intronic_pct_max`).
+
+| Parameter | Description | Default |
+|---|---|---|
+| `--high_artifact_mode` | Enable the SNV-level + read-level filters above | off |
+| `--novel_exon_pct_max` | SNV-level filter cutoff: per-gene fraction of intronic territory broadly covered by reads; genes above the cutoff drop intronic SNVs | 0.25 |
+| `--read_intronic_pct_max` | Read-level filter cutoff: per-read intronic / total aligned bp; reads above the cutoff are excluded | 0.60 |
+| `--gsi_base_pkl_path` | Explicit path to SCOTCH base pickle (auto-resolved if omitted) | auto |
+
+</details>
+
+<details open>
+<summary><b>Job completion</b></summary>
+
+A `step3_job{N}.done` marker is written to `{output_folder}/job_markers/` for each successful array task. After the array finishes, `ls {output_folder}/job_markers/step3_*.done | wc -l` should equal `--n_jobs`.
+
+</details>
+
+### Step 4 — Summary statistics + count matrix
+This step aggregates per-gene haplotype statistics and produces haplotype-aware count matrices at both gene and isoform levels (bulk + per cell type).
+
+<details open>
+<summary><b>Parallelization</b></summary>
+
+Single job by default, or SLURM array across samples for multi-sample inputs (`--job_array_by_sample --job_index $SLURM_ARRAY_TASK_ID`).
+
+</details>
+
+<details open>
+<summary><b>Outputs</b></summary>
+
+| File | Path |
+|---|---|
+| `summary_statistics.csv` | `{output_folder}/summary_statistics_{prefix}/summary_statistics.csv` |
+| `snv_hap_map.csv` | `{output_folder}/snv_hap_{prefix}/snv_hap_map.csv` |
+| `read_hap_map.csv` | `{output_folder}/snv_hap_{prefix}/read_hap_map.csv` |
+| Per-gene summaries | `{output_folder}/summary_statistics_{prefix}/all_genes_separate/` |
+| Bulk isoform count matrices | `{output_folder}/count_hap_{prefix}/all_genes/` |
+| Per-cell-type isoform tables | `{output_folder}/count_hap_{prefix}/ct_isoform_separate/{cell_type}/` |
+| Per-cell-type aggregated isoform tables | `{output_folder}/count_hap_{prefix}/all_genes/ct_{cell_type}_isoform_agg*.csv` |
+
+</details>
+
+<details>
+<summary><b>Column dictionary</b></summary>
+
+**`summary_statistics.csv` — per-gene haplotype + isoform statistics**
+
+| Column | Description |
+|---|---|
+| `geneID`, `geneName` | Gene identifiers |
+| `gamma` | EM mapping-bias parameter (fixed at 0.5 in current model) |
+| `n_reads`, `n_reads_phasable`, `n_snvs` | Per-gene read and SNV counts (`n_reads_phasable` = reads that cover ≥1 phasing SNV) |
+| `alpha_hat`, `alpha_hat_low`, `alpha_hat_high` | Minor haplotype allelic balance (EM point estimate + bounds) |
+| `major_hap` | Major haplotype label (`A` or `B`) |
+| `ll_alt`, `ll_null` | Log-likelihoods of the alternative (αEM) and null (α = 0.5) models |
+| `lrt_stat`, `p_value` | Likelihood ratio statistic and unadjusted gene-level ASE p-value |
+| `p_value_gene_adj` | FDR-adjusted gene-level ASE p-value (within sample) |
+| `chi2_isoform`, `df_isoform` | Chi-squared statistic and degrees of freedom for the ASTU test |
+| `p_value_isoform`, `p_value_isoform_high`, `p_value_isoform_low` | ASTU p-values (point + bound variants) |
+| `p_value_isoform_adj`, `p_value_isoform_adj_high`, `p_value_isoform_adj_low` | FDR-adjusted ASTU p-values |
+| `CellType` | Cell type identifier (`Bulk` for bulk-level rows) |
+
+**`snv_hap_map.csv` — per-SNV haplotype assignments**
+
+| Column | Description |
+|---|---|
+| `chrom`, `pos` | SNV genomic coordinates (0-based) |
+| `ref`, `alt` | Reference and alternate alleles |
+| `depth`, `alt_count`, `alt_frac` | Read support at the SNV site |
+| `ID` | SNV identifier (`chr:pos:ref:alt`) |
+| `het_prob` | Heterozygous probability under the binomial model |
+| `h_A` | Probability that the alt allele is on haplotype A |
+| `h_m` | Marker probability — confidence that the SNV is a true heterozygous phasing marker |
+| `hat_Z_binary` | Binary indicator (1 = SNV retained as a phasing marker after EM) |
+| `geneName`, `geneID` | Gene identifiers |
+
+**`read_hap_map.csv` — per-read haplotype posteriors**
+
+| Column | Description |
+|---|---|
+| `Read` | Read name from the source BAM |
+| `hat_I` | Posterior probability that the read is on haplotype A |
+| `hat_I_B` | Posterior probability that the read is on haplotype B (= 1 − `hat_I`) |
+| `geneName`, `geneID` | Gene identifiers |
+
+</details>
+
+<details>
+<summary><b>Configurable arguments</b></summary>
+
+**Required**
+
+| Parameter | Description |
+|---|---|
+| `--task` | `step4` |
+| `--scotch_target` | Path(s) to SCOTCH output directory |
+| `--output_folder` | Output directory |
+| `--summary_haplotype` | Write `summary_statistics.csv` (required for step 5 input) |
+| `--summary_count` | Write count matrices (bulk + per-cell-type) |
+
+Both `--summary_haplotype` and `--summary_count` are flags that default to off — without them, step 4 runs but produces no output.
+
+**Optional**
+
+| Parameter | Description | Default |
+|---|---|---|
+| `--prefix` | Output filename prefix | none |
+| `--cell_type_df_path` | CSV with `Cell` / `CellType` columns | none |
+| `--job_array_by_sample` | Process one sample per `job_index` (multi-sample) | off |
+| `--job_index` | Sample index when `--job_array_by_sample` is on | 0 |
+
+</details>
+
+<details open>
+<summary><b>Job completion</b></summary>
+
+`{output_folder}/job_markers/step4.done` is written when step 4 finishes (or `step4_sample{i}.done` per sample when `--job_array_by_sample` is on).
+
+</details>
+
+### Step 5 — Downstream analysis
+This step computes per-SNV and per-event allelic effect sizes (ASE, ASTU) and haplotype–event association tests, and links nearby SNVs to their events.
+
+<details open>
+<summary><b>Parallelization</b></summary>
+
+Single job, multi-CPU by default (set `--n_workers` to your available CPU count). For multi-sample inputs, run as a SLURM array across samples (`--job_array_by_sample --job_index $SLURM_ARRAY_TASK_ID`).
+
+</details>
+
+<details open>
+<summary><b>Outputs</b></summary>
+
+| File | Description | Path |
+|---|---|---|
+| `gene_snv.csv` | SNV-centric — phased SNV assignments and signed ASE / ASTU effects, with gene-level allelic statistics per cell type. | `{output_folder}/downstream_{prefix}/gene_snv.csv` |
+| `event_snv.csv` | Event-centric — haplotype-associated exon and junction events, linked nearby SNVs, and raw chi-squared validation. | `{output_folder}/downstream_{prefix}/event_snv.csv` |
+
+</details>
+
+<details>
+<summary><b>Column dictionary</b></summary>
+
+**`gene_snv.csv` — SNV-centric table**
+
+| Column | Description |
+|---|---|
+| `Sample`, `CellType` | Sample and cell type identifiers |
+| `geneID`, `geneName`, `geneChr` | Gene identifiers |
+| `n_reads`, `n_reads_phasable`, `gene_n_snvs`, `gene_n_snvs_called` | Gene-level read counts (`n_reads`, `n_reads_phasable`) and SNV counts — `gene_n_snvs` = total candidate SNVs, `gene_n_snvs_called` = SNVs actually called / used in phasing. |
+| `gene_alpha_hat`, `gene_alpha_hat_low`, `gene_alpha_hat_high` | Minor haplotype allelic balance (EM estimate + bounds) |
+| `gene_alpha_hat_major`, `gene_alpha_hat_major_low`, `gene_alpha_hat_major_high` | Major haplotype allelic balance (1 − minor) |
+| `gene_major_hap`, `gene_minor_hap` | Haplotype labels (A or B) |
+| `gene_p_value`, `gene_p_value_adj` | Gene-level ASE significance test on phased reads (BH-adjusted). **Raw test significance, NOT the final call** — small p alone over-calls ASE; final call is `ASE_call`. |
+| `ASE_call` | **Final ASE call** (3-category): `1` significant (`gene_p_value_adj ≤ 0.05` **and** `gene_alpha_hat_high < 0.5`), `-1` not significant (`gene_p_value_adj > 0.05`), `0` inconclusive (p significant but α CI overlaps 0.5). |
+| `dominant_isoform_overall` | Most expressed isoform across both haplotypes |
+| `top_isoform_hap_major`, `top_isoform_hap_minor` | Top isoform on each haplotype |
+| `top_isoform_hap_major_frac`, `top_isoform_hap_minor_frac` | Fraction of hap reads from top isoform |
+| `isoform_p_value`, `isoform_p_value_adj` | Gene-level ASTU significance test on phased reads (point estimate, BH-adjusted). **Raw test significance, NOT the final call** — final call is `ASTU_call`. |
+| `isoform_p_value_high`, `isoform_p_value_low`, `isoform_p_value_adj_high`, `isoform_p_value_adj_low` | ASTU significance at the high / low bounds of the isoform-balance CI (BH-adjusted); used to derive `ASTU_call`. |
+| `ASTU_call` | **Final ASTU call** (3-category): `1` significant (`isoform_p_value_adj_high ≤ 0.05`), `-1` not significant (`isoform_p_value_adj_low > 0.05`), `0` inconclusive (low bound significant but high bound not). |
+| `shrinkage_k` | Shrinkage constant added to major / minor hap read counts when computing `es_ase` / `es_astu` (effect-size regularization; does **not** shape the CI). |
+| `es_ase` | ASE effect size: log2(major / minor hap reads) |
+| `es_astu` | ASTU effect size: log2(dominant isoform major / minor fraction) |
+| `astu_source` | `bulk`, `ct_specific`, or `bulk_fallback` |
+| `snvID` | Stable SNV key (`chr:pos:ref:alt`) |
+| `snv_pos`, `snv_ref`, `snv_alt` | SNV coordinates and alleles |
+| `snv_depth_bulk`, `snv_alt_count_bulk`, `snv_alt_frac_bulk` | SNV read support from variant calling (bulk pileup) |
+| `h_A`, `hat_Z_prob_revised` | Haplotype-A frequency and phasing confidence |
+| `snv_hap` | Haplotype carrying the alt allele (A or B) |
+| `snv_on_minor_hap` | Whether SNV alt allele is on the minor haplotype |
+| `snv_expr_direction` | `higher_gene_expression` or `lower_gene_expression` |
+| `snv_es_ase_signed` | Signed ASE effect from SNV alt allele perspective |
+| `dominant_isoform_pref_hap` | Haplotype with higher dominant isoform usage |
+| `snv_astu_direction` | `+` if dominant isoform increased on SNV hap, `−` otherwise |
+| `snv_es_astu_signed` | Signed ASTU effect from SNV alt allele perspective |
+
+**`event_snv.csv` — Event-centric table**
+
+| Column | Description |
+|---|---|
+| `Sample`, `CellType` | Sample and cell type identifiers |
+| `geneID`, `geneName`, `geneChr` | Gene identifiers |
+| `gene_major_hap`, `es_ase`, `es_astu` | Gene context (duplicated for self-containment) |
+| `ASE_call`, `ASTU_call` | Final ASE / ASTU calls (3-category) for the gene, duplicated from `gene_snv.csv` — see that table for the rules. |
+| `dominant_isoform_overall`, `top_isoform_hap_major`, `top_isoform_hap_minor` | Isoform context |
+| `eventID` | Stable event key (`event_type:start-end`) |
+| `event_type` | `exon` or `junction` |
+| `event_start`, `event_end` | Event genomic coordinates |
+| `w_A_present`, `w_A_absent`, `w_B_present`, `w_B_absent` | Weighted haplotype read counts |
+| `obs_hapA_include`, `obs_hapA_skip`, `obs_hapA_unobserved` | Haplotype-A weighted read counts from raw BAM CIGAR observation: read alignment includes the event, splices over it (cassette skip / different junction), or fails to cover the event region (truncated). |
+| `obs_hapB_include`, `obs_hapB_skip`, `obs_hapB_unobserved` | Same three categories for haplotype-B. The three columns sum to the per-read EM weight total in the joined pool (`obs_*` is per-read; existing `w_*` is isoform-multiplicity weighted, so the two are not equal when reads map to multiple isoforms). |
+| `obs_chi2`, `obs_p_value`, `obs_p_value_adj` | Chi-square test on the 2×2 `[[hapA_include, hapA_skip], [hapB_include, hapB_skip]]` table — `unobserved` is dropped so truncated reads don't pollute the test. Runs whenever both row and column margins are non-zero (a single zero cell is kept — complete include/skip on one hap is the strongest allele-specific signal); only an all-zero row/column → `insufficient_data`. `obs_p_value_adj` = within-gene BH FDR across events where `obs_test_type == 'chi2_hap_event'`; NaN `obs_p_value` → NaN adj. |
+| `obs_test_type` | `chi2_hap_event` (test ran), `insufficient_data` (2×2 sum < min_reads or a whole row/column margin is 0), or `no_bam` (per-gene `read_blocks.pkl` not present; other obs_* are `None`). Run `--task step1_5` (per-sample SLURM array, one task per BAM) followed by `--task step1_5_merge` (single task) to populate the pkl cache. |
+| `event_inclusion_frac_A`, `event_inclusion_frac_B` | Inclusion fraction per haplotype |
+| `event_pref_hap` | Haplotype with higher event inclusion |
+| `event_pref_major_minor` | `major` or `minor` relative to gene expression |
+| `event_chi2`, `event_p_value`, `event_p_value_adj` | Haplotype-event association test (within-gene FDR), SCOTCH isoform-inferred membership. Compare against `obs_*` for sensitivity to read truncation. |
+| `has_linked_snv` | Whether a nearby confident SNV is linked |
+| `linked_snv_count` | Number of nearby SNVs linked to this event |
+| `is_nearest_snv_for_event` | Whether this is the closest linked SNV |
+| `snvID`, `snv_pos`, `snv_ref`, `snv_alt` | Linked SNV identity (`NaN` if none) |
+| `snv_hap`, `h_A`, `hat_Z_prob_revised` | SNV phasing info (`NaN` if none) |
+| `exonic_distance`, `genomic_distance` | Distance from SNV to event boundary |
+| `snv_expr_direction`, `snv_astu_direction` | SNV regulatory interpretation |
+| `snv_event_direction` | `promotes_event` or `reduces_event` |
+| `raw_validation_available` | Whether raw read validation was performed |
+| `raw_ref_present`, `raw_ref_absent`, `raw_alt_present`, `raw_alt_absent` | Raw BAM allele × event counts |
+| `raw_total_reads` | Total raw reads in contingency table |
+| `raw_chi2`, `raw_p_value`, `raw_p_value_adj` | Raw-read validation statistics. `raw_chi2` is populated only for `chi2_cross_event`; for `binomial_intra_event`, `raw_p_value` is the binomial test result and `raw_chi2` is `None`. `raw_p_value_adj` = within-gene BH FDR across all `(event, SNV)` raw tests; NaN `raw_p_value` → NaN adj. |
+| `raw_test_type` | `chi2_cross_event` (default 2×2 chi-square) or `binomial_intra_event` (SNV inside the exon event — fallback binomial test on ref vs alt counts, p=0.5). |
+
+Canonical reference (with interpretation of the two event tests): [`docs/output_schema.md`](docs/output_schema.md).
+
+</details>
+
+<details>
+<summary><b>Configurable arguments</b></summary>
+
+**Required**
+
+| Parameter | Description |
+|---|---|
+| `--task` | `step5` |
+| `--scotch_target` | Path(s) to SCOTCH output directory |
+| `--bam_path` | Aligned BAM file(s) (used for raw SNV–event chi-squared) |
+| `--output_folder` | Output directory |
+
+**Common optional**
+
+| Parameter | Description | Default |
+|---|---|---|
+| `--prefix` | Output filename prefix | none |
+| `--cell_type_df_path` | CSV with `Cell` / `CellType` columns | none |
+| `--gene_subset_path` | Restrict to subset of genes | none |
+| `--n_workers` | Parallel worker processes | 1 |
+| `--job_array_by_sample` / `--job_index` | Sample-array execution | off / 0 |
+
+**Downstream knobs**
+
+| Parameter | Description | Default |
+|---|---|---|
+| `--event_min_reads` | Minimum weighted read count per event test | 10 |
+| `--snv_event_distance` | ±bp exonic distance for SNV–event linking | 50 |
+| `--event_mode` | `all_events` / `switching_events` / `fdr_events` | `all_events` |
+| `--fdr_events_value` | FDR cutoff when `event_mode=fdr_events` | 0.05 |
+| `--astu_sig_only` | Filter Task 4 to ASTU-significant genes (per cell type) | off |
+| `--astu_sig_from_bulk` | Use Bulk ASTU significance for all cell types (overrides `--astu_sig_only`) | off |
+| `--astu_sig_threshold` | p-value cutoff for ASTU gene filtering | 0.05 |
+
+</details>
+
+<details open>
+<summary><b>Job completion</b></summary>
+
+`{output_folder}/job_markers/step5.done` is written when step 5 finishes. To audit per-step missing genes across the whole pipeline, run `--task check`:
 
 ```bash
-# Use the bundled database (hg38)
-python src/longallele.py --task step3 \
-    --rna_editing_db src/rna_editing_hg38.npz \
-    ...
+python src/longallele.py --task check \
+    --scotch_target /path/to/scotch_output \
+    --output_folder /path/to/results \
+    --n_jobs 50
 ```
 
-The database uses 0-based coordinates (matching LongAllele's internal convention) and stores per-chromosome sorted position arrays for fast `np.searchsorted` lookup. Sites are checked by reference base: ref=A positions against known A-to-G editing sites (+ strand genes), ref=T positions against known T-to-C sites (− strand genes, complement of A-to-I).
-
-## Outputs
-
-**Coordinate system:** all genomic positions in LongAllele outputs (SNV positions, event coordinates) use **0-based** coordinates.
-
-### Step 3–4 outputs (in `{output_folder}/`)
-
-| Path | Content |
-|------|---------|
-| `summary_statistics_{prefix}/summary_statistics.csv` | Per-gene haplotype statistics, alpha estimates, p-values |
-| `summary_statistics_{prefix}/all_genes_separate/` | Per-gene summary CSVs |
-| `count_hap_{prefix}/all_genes/` | Aggregated isoform count matrices (bulk) |
-| `count_hap_{prefix}/ct_isoform_separate/{cell_type}/` | Per-cell-type per-gene isoform tables |
-| `count_hap_{prefix}/all_genes/ct_{cell_type}_isoform_agg*.csv` | Per-cell-type aggregated isoform tables |
-
-### Step 5 outputs (in `downstream_{prefix}/`)
-
-Two self-contained CSV files with `Sample` and `CellType` columns.
-
-| File | Granularity | Key columns |
-|------|-------------|-------------|
-| `gene_snv.csv` | One row per confident phased SNV per gene per cell type | `geneID`, `gene_alpha_hat`, `gene_p_value_adj`, `es_ase`, `es_astu`, `snv_hap`, `snv_es_ase_signed`, `snv_es_astu_signed` |
-| `event_snv.csv` | One row per haplotype-associated event per cell type (duplicated per linked SNV) | `eventID`, `event_type`, `event_p_value_adj`, `raw_p_value`, `snv_event_direction`, `exonic_distance` |
-
-Full column dictionary: see [`docs/output_schema.md`](docs/output_schema.md).
-
-## Interpreting results
-
-Step 5 produces two complementary statistical tests for linking genetic variants to splicing / isoform events. Understanding their relationship is critical for variant interpretation.
-
-### Two tests, two questions
-
-| | Haplotype-event test | SNV-event test (raw) |
-|---|---|---|
-| **Column prefix** | `event_chi2`, `event_p_value` | `raw_chi2`, `raw_p_value` |
-| **Question** | Does this event differ between haplotype A and B? | Does a specific SNV allele associate with this event? |
-| **Haplotype source** | EM posterior (hat_I), integrates ALL phasing SNVs in the gene | Hard allele call at ONE specific SNV position |
-| **Event membership** | SCOTCH isoform assignment (accounts for read truncation) | SCOTCH isoform assignment (same, conditioned on SNV-covering reads) |
-| **Strength** | Detects haplotype effects even when causal variant is distant from the event | Directly tests a specific variant, unaffected by EM phasing uncertainty |
-
-### Concordance and discordance (Tier 1–4)
-
-**Both significant, concordant direction (Tier 1)** — Strongest evidence. The event differs between haplotypes AND the specific nearby SNV is associated. High confidence in both the regulatory event and the causal variant.
-
-**SNV-event significant, haplotype-event weak or not significant (Tier 2)** — The local SNV-event association is real, but the EM-based haplotype test is diluted. This occurs when SCOTCH maps truncated reads (from RNA degradation) to functional isoforms, crediting them with events they do not physically span. These reads have uncertain EM phasing (hat_I near 0.5) because they may not reach the phasing SNVs, which dilutes the haplotype-event signal. The raw SNV-event test avoids this by conditioning on reads that cover the SNV, where read truncation is unrelated to allele identity. **Use the raw p-value as primary evidence for these local associations.**
-
-**Haplotype-event significant, no significant nearby SNV-event (Tier 3)** — The event truly differs between haplotypes, but the causal variant is not nearby. The regulatory variant may be distant (acting through long-range haplotype effects) or may not have been called. This is where the EM framework adds the most value over simple SNV-event testing: it links reads covering distant SNVs to reads covering the event through shared haplotype assignment.
-
-**Discordant direction (Tier 4)** — Rare. May indicate phasing errors, multiple variants with opposing effects, or complex haplotype structure. Requires manual review.
-
-### When does each test have more power?
-
-- **SNV near event (same exon or adjacent)**: the raw SNV-event test is more powerful. Reads covering the SNV are likely to also be informative for the event, and the test is not diluted by truncated reads with uncertain phasing.
-- **SNV far from event (different exons)**: the haplotype-event test is more powerful. Few reads span both the SNV and the distant event, so the raw test has low sample size. The EM leverages partial reads (some covering only the SNV, others only the event) linked through haplotype assignment.
-
-### Relationship to sQTL mapping
-
-The raw SNV-event test resembles sQTL analysis (testing genotype–splice-junction associations). Key differences:
-
-- **sQTL** requires a population (N=100+) for power; each individual contributes one aggregated data point. LongAllele works with **a single individual** because each read is a data point.
-- **sQTL** relies on short-read variant calling, which systematically misses variants in low-complexity regions (e.g., trinucleotide repeats). LongAllele calls variants from long reads with an escape clause for high-confidence variants in repeat regions.
-- **sQTL** tests individual junctions. LongAllele additionally provides **haplotype-level isoform quantification** (full isoform composition per haplotype, not just single-junction inclusion ratios).
-- **sQTL** cannot link distant variants to events on the same molecule. Long reads enable **within-read phasing**: a single read can carry a SNV allele and span a splice junction kilobases away.
+</details>
 
 ## Citation
 
-A preprint describing LongAllele is in preparation. The DOI and BibTeX entry will be posted here once available. In the meantime, please cite this repository.
+A preprint describing LongAllele is in preparation. Until the DOI is available, please cite this repository:
+
+```bibtex
+@misc{longallele2026,
+  title  = {LongAllele: a joint inference framework for allele-specific
+            analysis on long-read bulk and single-cell RNA sequencing},
+  author = {Xu, Zhuoran and Wang, Kai},
+  year   = {2026},
+  url    = {https://github.com/WGLab/LongAllele}
+}
+```
+
+The preprint DOI and full BibTeX entry will be posted here once available.
+
+## Contributing and support
+
+Bug reports, feature requests, and questions are welcome via [GitHub Issues](https://github.com/WGLab/LongAllele/issues). Pull requests are also welcome — please open an issue first to discuss substantial changes.
+
+## License
+
+LongAllele is released under the [MIT License](LICENSE).
