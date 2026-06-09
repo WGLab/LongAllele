@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="repo/logo.png" alt="LongAllele — a joint inference framework for allele-specific analysis on long-read bulk and single-cell RNA sequencing" width="600">
+  <img src="repo/logo.png" alt="LongAllele — a joint inference framework for allele-specific analysis on long-read bulk and single-cell RNA sequencing" width="400">
 </p>
 
 <p align="center">
