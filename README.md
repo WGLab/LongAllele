@@ -31,7 +31,7 @@ pip install -r requirements.txt
 
 LongAllele runs on HPC clusters via SLURM. The bundled `longallele.sh` script submits all pipeline steps as a dependency-chained job graph — one command is all you need.
 
-**1. Fill in your paths:**
+**1. Fill in your paths and basic parameter settings:**
 
 ```bash
 cp config_template.sh my_run.sh
@@ -56,7 +56,7 @@ Step 3   EM haplotyping     → array job 1005  (50 tasks)
 Step 4   summary + counts   → job      1006
 Step 5   downstream         → job      1007
 
-step1(1001) ──┬──→ step1_5(1002) ──→ step1_5_merge(1004) ─┐
+step1(1001) ──┬──→ step1_5(1002) ──→ step1_5_merge(1004) ─────┐
               └──→ step2(1003) ──→ step3(1005) ──→ step4(1006) ─┴──→ step5(1007)
 ```
 
