@@ -46,11 +46,11 @@ bash longallele.sh my_run.sh
 
 That's it. All steps are submitted with correct SLURM dependencies and run automatically in order. Output lands in `OUTPUT_DIR` once all jobs complete.
 
-See [Pipeline](#pipeline) for per-step documentation and all configurable arguments.
+See [Per-step pipeline](#per-step-pipeline) for per-step documentation and all configurable arguments.
 
-## Pipeline
+## Per-step pipeline
 
-LongAllele consists of five sequential steps. The pipeline takes an aligned BAM and reference FASTA (with [SCOTCH](https://github.com/WGLab/SCOTCH) read-to-isoform mappings as upstream input) and produces per-gene haplotype statistics, haplotype-aware count matrices (gene- and isoform-levels), and downstream allelic effect-size and SNV–event linkage tables. Each step below documents its task, parallelization, outputs, and (folded) configurable arguments.
+LongAllele consists of five sequential steps. The pipeline takes an aligned BAM and reference FASTA (with [SCOTCH](https://github.com/WGLab/SCOTCH) read-to-isoform mappings as upstream input) and produces per-gene haplotype statistics, haplotype-aware count matrices (gene- and isoform-levels), and downstream allelic effect-size and SNV–event linkage tables. Each step below documents its task, parallelization, outputs, and (folded) configurable arguments. Steps can also be run individually with `python src/longallele.py --task <step>` without using `longallele.sh`.
 
 All genomic positions in LongAllele outputs use **0-based** coordinates.
 
