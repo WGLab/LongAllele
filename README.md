@@ -50,7 +50,7 @@ See [Per-step pipeline](#per-step-pipeline) for per-step documentation and all c
 
 ## Per-step pipeline
 
-LongAllele consists of five sequential steps. The pipeline takes an aligned BAM and reference FASTA (with [SCOTCH](https://github.com/WGLab/SCOTCH) read-to-isoform mappings as upstream input) and produces per-gene haplotype statistics, haplotype-aware count matrices (gene- and isoform-levels), and downstream allelic effect-size and SNV–event linkage tables. Each step below documents its task, parallelization, outputs, and (folded) configurable arguments. Steps can also be run individually with `python src/longallele.py --task <step>` without using `longallele.sh`.
+LongAllele consists of five sequential steps. The pipeline takes an aligned BAM and reference FASTA (with [SCOTCH](https://github.com/WGLab/SCOTCH) read-to-isoform mappings as upstream input) and produces per-gene haplotype statistics, haplotype-aware count matrices (gene- and isoform-levels), and downstream allelic effect-size and SNV–event linkage tables. Each step section below contains a **▶ Configurable arguments** panel — click to expand for the full parameter list. Steps can also be run individually with `python src/longallele.py --task <step>` without using `longallele.sh`.
 
 All genomic positions in LongAllele outputs use **0-based** coordinates.
 
@@ -170,6 +170,10 @@ A `step2_job{N}.done` marker is written to `{output_folder}/job_markers/` for ea
 
 ### Step 3 — EM haplotyping
 This step jointly infers heterozygous variants, haplotype structure, and read–haplotype assignment per gene via expectation–maximization.
+
+**Key flags to set for real data:**
+- `--clf_init` — use SNV classifier scores to initialize haplotype priors. **Recommended for all real-data runs.**
+- `--high_artifact_mode` — enable extra filters for nascent-RNA leak in single-nucleus RNA-seq. **Recommended for brain (snRNA-seq) data.**
 
 <details open>
 <summary><b>Parallelization</b></summary>
