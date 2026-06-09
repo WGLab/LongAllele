@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.9%2B-blue" alt="Python"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
-  <a href="#citation"><img src="https://img.shields.io/badge/preprint-coming%20soon-lightgrey" alt="Preprint"></a>
+  <a href="https://doi.org/10.64898/2026.05.05.722992"><img src="https://img.shields.io/badge/bioRxiv-2026.05.05.722992-b31b1b" alt="bioRxiv"></a>
 </p>
 
 Allele-specific analysis from RNA-seq is a powerful approach to characterize *cis*-regulatory effects. However, existing methods remain limited in both haplotype inference and allelic testing. Their haplotype-inference workflows separate variant calling, haplotype phasing, and read-haplotype assignment into sequential steps, failing to fully exploit within-read single-nucleotide variant (SNV) linkage information and propagating errors into downstream allelic analysis. At the testing stage, they ignore non-phasable reads lacking heterozygous SNVs, biasing calls and inflating false positives, and remain incomplete across gene-, isoform-, and local-event-level variant effects.
@@ -29,62 +29,38 @@ pip install -r requirements.txt
 
 ## Quickstart
 
-Below shows the **minimum arguments** required for each of five `--task` steps. See [Pipeline](#pipeline) session for more details.
+LongAllele runs on HPC clusters via SLURM. The bundled `longallele.sh` script submits all pipeline steps as a dependency-chained job graph — one command is all you need.
 
-
-```bash
-# ── Step 1: variant calling ─────────────────────────────────────
-python src/longallele.py --task step1 \
-    --scotch_target  /path/to/scotch_output `# SCOTCH output dir — all steps` \
-    --bam_path       /path/to/aligned.bam   `# aligned BAM — steps 1/2/3/5` \
-    --ref_fasta_path /path/to/genome.fa     `# reference FASTA — steps 1/2/3` \
-    --output_folder  /path/to/results       `# output dir — all steps`
-
-# ── Step 2: EM input generation ─────────────────────────────────
-python src/longallele.py --task step2 \
-    --scotch_target  /path/to/scotch_output \
-    --bam_path       /path/to/aligned.bam   \
-    --ref_fasta_path /path/to/genome.fa     \
-    --output_folder  /path/to/results
-
-# ── Step 3: EM haplotyping ──────────────────────────────────────
-python src/longallele.py --task step3 \
-    --scotch_target  /path/to/scotch_output \
-    --bam_path       /path/to/aligned.bam   \
-    --ref_fasta_path /path/to/genome.fa     \
-    --output_folder  /path/to/results       \
-    --clf_init                              `# strongly recommended for real data — use SNV classifier scores to initialize h_m`
-# Note: --rna_editing_db defaults to the bundled src/rna_editing_hg38.npz;
-# override only when running on a non-hg38 reference.
-
-# ── Step 4: summary statistics + count matrix ───────────────────
-python src/longallele.py --task step4 \
-    --scotch_target /path/to/scotch_output \
-    --output_folder /path/to/results       \
-    --summary_haplotype  `# write per-gene summary_statistics.csv — step 4 only` \
-    --summary_count      `# write per-gene count matrices — step 4 only`
-
-# ── Step 5: downstream analysis (effect sizes + SNV–event linkage) ─
-python src/longallele.py --task step5 \
-    --scotch_target /path/to/scotch_output \
-    --bam_path      /path/to/aligned.bam   `# required for raw SNV–event chi-squared (Tier 1–4 interpretation)` \
-    --output_folder /path/to/results
-
-# ── Inspect the final outputs ───────────────────────────────────
-head /path/to/results/downstream_/gene_snv.csv
-head /path/to/results/downstream_/event_snv.csv
-```
-
-**Multi-sample-analysis** — Similarly with SCOTCH, LongAllele allows batch analysis for multiple samples. Set `--scotch_target`, `--bam_path`, and `--sample_names` to run all 5 steps jointly across samples. For steps 4 and 5, add `--job_array_by_sample --job_index $SLURM_ARRAY_TASK_ID` to fan out one sample per array task. Example as below.
+**1. Fill in your paths:**
 
 ```bash
-python src/longallele.py --task step1 \
-    --scotch_target /path/to/scotch/sample1 /path/to/scotch/sample2 \
-    --bam_path      /path/to/sample1.bam   /path/to/sample2.bam \
-    --sample_names  sample1 sample2 \
-    --ref_fasta_path /path/to/genome.fa \
-    --output_folder /path/to/results
+cp config_template.sh my_run.sh
+# edit my_run.sh — set SCOTCH_TARGET, BAM_PATH, REF_FASTA, OUTPUT_DIR, etc.
 ```
+
+**2. Submit the full pipeline:**
+
+```bash
+bash longallele.sh my_run.sh
+```
+
+That's it. All steps are submitted with correct SLURM dependencies and run automatically in order. Output lands in `OUTPUT_DIR` once all jobs complete.
+
+```
+# Example output after submission:
+Step 1   variant calling    → array job 1001  (50 tasks)
+Step 1.5 read-block collect → array job 1002  (1 task, parallel with step 2)
+Step 2   EM input           → array job 1003  (50 tasks)
+Step 1.5 read-block merge   → job      1004
+Step 3   EM haplotyping     → array job 1005  (50 tasks)
+Step 4   summary + counts   → job      1006
+Step 5   downstream         → job      1007
+
+step1(1001) ──┬──→ step1_5(1002) ──→ step1_5_merge(1004) ─┐
+              └──→ step2(1003) ──→ step3(1005) ──→ step4(1006) ─┴──→ step5(1007)
+```
+
+See [Pipeline](#pipeline) for per-step documentation and all configurable arguments.
 
 ## Pipeline
 
@@ -539,47 +515,29 @@ python src/longallele.py --task check \
 
 </details>
 
-### Optional — Read-block collection (enables `obs_*` validation columns)
+### Note: `obs_*` validation columns
 
-<details>
-<summary>Expand for details</summary>
+`longallele.sh` automatically handles read-block collection (`--task step1_5` / `step1_5_merge`) as part of the submitted job graph — no extra action needed. These tasks run in parallel with step 2 and their output is ready before step 5 starts.
 
-By default, the `obs_*` columns in `event_snv.csv` (CIGAR-observed haplotype-event tests) are `None`. To populate them, run this two-part optional step **after step 1 and before step 5**:
-
-```bash
-# Part 1 — one SLURM task per BAM (--n_jobs must equal number of samples)
-python src/longallele.py --task step1_5 \
-    --scotch_target /path/to/scotch_output \
-    --bam_path      /path/to/aligned.bam \
-    --ref_fasta_path /path/to/genome.fa \
-    --output_folder /path/to/results \
-    --n_jobs N_SAMPLES --job_index $SLURM_ARRAY_TASK_ID
-
-# Part 2 — single merge task (run after all Part 1 tasks finish)
-python src/longallele.py --task step1_5_merge \
-    --scotch_target /path/to/scotch_output \
-    --output_folder /path/to/results
-```
-
-This step is independent of steps 2–4 and can run in parallel with them. Step 5 will automatically detect and use the merged cache once `step1_5_merge.done` exists.
-
-</details>
+If running steps manually (without `longallele.sh`), see the [step 1.5 tasks](#configurable-arguments-3) in the Pipeline section for the two-part collection commands.
 
 ## Citation
 
-A preprint describing LongAllele is in preparation. Until the DOI is available, please cite this repository:
+If you use LongAllele, please cite our preprint:
+
+> Xu Z, Wang K. LongAllele: a joint inference framework for allele-specific analysis on long-read bulk and single-cell RNA sequencing. *bioRxiv* 2026. https://doi.org/10.64898/2026.05.05.722992
 
 ```bibtex
-@misc{longallele2026,
-  title  = {LongAllele: a joint inference framework for allele-specific
-            analysis on long-read bulk and single-cell RNA sequencing},
-  author = {Xu, Zhuoran and Wang, Kai},
-  year   = {2026},
-  url    = {https://github.com/WGLab/LongAllele}
+@article{longallele2026,
+  title   = {LongAllele: a joint inference framework for allele-specific
+             analysis on long-read bulk and single-cell RNA sequencing},
+  author  = {Xu, Zhuoran and Wang, Kai},
+  journal = {bioRxiv},
+  year    = {2026},
+  doi     = {10.64898/2026.05.05.722992},
+  url     = {https://www.biorxiv.org/content/10.64898/2026.05.05.722992}
 }
 ```
-
-The preprint DOI and full BibTeX entry will be posted here once available.
 
 ## Contributing and support
 
