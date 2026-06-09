@@ -120,7 +120,7 @@ A `step1_job{N}.done` marker is written to `{output_folder}/job_markers/` for ea
 
 ### Step 1.5 — Read-block collection *(optional)*
 
-This step collects per-read CIGAR block information from the BAM, enabling the `obs_*` raw-read validation columns in `event_snv.csv` (step 5 output). It is **not required** for core ASE/ASTU analysis — skip it if you do not need raw-read event validation.
+This step enables the `obs_*` raw-read validation columns in [`event_snv.csv`](#step-5--downstream-analysis) (step 5 output). It is **not required** for core ASE/ASTU analysis — skip it if you do not need raw-read event validation.
 
 Run as a two-part task: a per-sample array followed by a single merge job.
 
