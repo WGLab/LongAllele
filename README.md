@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.9%2B-blue" alt="Python"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
-  <a href="https://doi.org/10.64898/2026.05.05.722992"><img src="https://img.shields.io/badge/bioRxiv-2026.05.05.722992-b31b1b" alt="bioRxiv"></a>
+  <a href="https://www.biorxiv.org/content/10.64898/2026.05.05.722992v2"><img src="https://img.shields.io/badge/bioRxiv-2026.05.05.722992-b31b1b" alt="bioRxiv"></a>
 </p>
 
 Allele-specific analysis from RNA-seq is a powerful approach to characterize *cis*-regulatory effects. However, existing methods remain limited in both haplotype inference and allelic testing. Their haplotype-inference workflows separate variant calling, haplotype phasing, and read-haplotype assignment into sequential steps, failing to fully exploit within-read single-nucleotide variant (SNV) linkage information and propagating errors into downstream allelic analysis. At the testing stage, they ignore non-phasable reads lacking heterozygous SNVs, biasing calls and inflating false positives, and remain incomplete across gene-, isoform-, and local-event-level variant effects.
