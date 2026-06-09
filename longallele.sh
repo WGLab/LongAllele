@@ -194,8 +194,5 @@ fi
 
 echo ""
 echo "=== All jobs submitted ==="
-echo "step1($JID1) ──┬──→ step1_5($JID15) ──→ step1_5_merge($JID15M) ─┐"
-echo "               └──→ step2($JID2) ──→ step3($JID3) ──→ step4($JID4) ─┴──→ step5($JID5)"
-echo ""
 echo "Monitor:  squeue -u \$USER"
-echo "Logs:     $OUTPUT_DIR/../logs/"
+echo "Logs:     logs/"

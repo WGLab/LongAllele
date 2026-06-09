@@ -46,20 +46,6 @@ bash longallele.sh my_run.sh
 
 That's it. All steps are submitted with correct SLURM dependencies and run automatically in order. Output lands in `OUTPUT_DIR` once all jobs complete.
 
-```
-# Example output after submission:
-Step 1   variant calling    → array job 1001  (50 tasks)
-Step 1.5 read-block collect → array job 1002  (1 task, parallel with step 2)
-Step 2   EM input           → array job 1003  (50 tasks)
-Step 1.5 read-block merge   → job      1004
-Step 3   EM haplotyping     → array job 1005  (50 tasks)
-Step 4   summary + counts   → job      1006
-Step 5   downstream         → job      1007
-
-step1(1001) ──┬──→ step1_5(1002) ──→ step1_5_merge(1004) ─────┐
-              └──→ step2(1003) ──→ step3(1005) ──→ step4(1006) ─┴──→ step5(1007)
-```
-
 See [Pipeline](#pipeline) for per-step documentation and all configurable arguments.
 
 ## Pipeline
