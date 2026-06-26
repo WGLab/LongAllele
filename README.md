@@ -257,6 +257,14 @@ Pre-EM classifier-based filtering. Train a classifier on validated SNV calls and
 | `--clf_pruning_threshold` | Score below which SNVs are considered low-quality | 0.1 |
 | `--clf_pruning_frac` | Max fraction of low-quality SNVs allowed (1.0 = no pruning) | 1.0 |
 
+We bundle a pretrained classifier at [`src/models/snv_classifier_ont_hg001_17feat.joblib`](src/models/snv_classifier_ont_hg001_17feat.joblib) — a balanced XGBoost (17 features) trained on **GIAB HG001** with WGS-genotype ground truth. It targets **ONT** systematic basecalling errors, so it is recommended for **ONT long-read data**. It has **not been validated on PacBio** (and is typically unnecessary there — PacBio runs usually omit `--snv_classifier`).
+
+Enable it with:
+
+```bash
+--snv_classifier src/models/snv_classifier_ont_hg001_17feat.joblib --clf_init
+```
+
 #### Advanced — High-artifact mode (snRNA-seq nascent-RNA leak)
 
 Single-nucleus RNA-seq libraries can contain substantial unspliced pre-mRNA (nascent-RNA leak). In long-read snRNA-seq, intron-dominated reads have ambiguous isoform origin and introduce artifacts into haplotype phasing. High-artifact mode (`--high_artifact_mode`) is an opt-in opt that adds two disabled-by-default filters to mitigate this. Default OFF; output is byte-identical to the standard pipeline when disabled.
