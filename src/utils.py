@@ -34,17 +34,37 @@ def load_pickle(file):
     return data
 
 
-# SCOTCH 10x-pacbio mode appends `_<alignment_length_bp>` to PacBio CCS read names
-# in the aux TSV (compatible.py:876); 10x-ont / parse-ont modes leave them alone.
-# Anchor the strip to PacBio CCS naming (`<movie>/<zmw>/ccs`) so ONT UUIDs and any
-# other naming scheme are never touched even if they happen to end in `_<digits>`.
-_READNAME_SUFFIX_RE = re.compile(r'(?<=/ccs)_\d+$')
+# SCOTCH appends `_<query_alignment_length>` to read names in the aux TSV when the
+# platform is PacBio (compatible.py: `if self.pacbio: readName = readName + '_' +
+# str(qend - qstart)`). The source BAM keeps the original name, so step1 must strip
+# this tag to match BAM query_names. PacBio read names are structured with '/'
+# (`<movie>/<zmw>/ccs` or `molecule/<n>`); strip a trailing `_<digits>` for those.
+# ONT/UUID names contain no '/' and are never tagged by SCOTCH, so they are left
+# untouched (avoids over-stripping names that merely happen to end in `_<digits>`).
+# (Earlier this was anchored to `/ccs`, which missed PacBio cohorts like Duke whose
+# names are `molecule/<n>` rather than `<movie>/<zmw>/ccs`.)
+_READNAME_SUFFIX_RE = re.compile(r'_\d+$')
 
 
 def canonicalize_read_name(name):
     if not isinstance(name, str):
         return name
-    return _READNAME_SUFFIX_RE.sub('', name)
+    if '/' in name:
+        return _READNAME_SUFFIX_RE.sub('', name)
+    return name
+
+
+def _keep_is_one_bytes(x):
+    """True if a raw TSV Keep field equals 1, tolerating both int ('1') and float
+    ('1.0') text forms. Mirrors the pandas `Keep == 1` comparison in _read_mapping,
+    which matches both 1 and 1.0 (the column becomes float if any value is NaN)."""
+    x = x.strip()
+    if x == b'1':
+        return True
+    try:
+        return float(x) == 1.0
+    except ValueError:
+        return False
 
 
 def compute_intron_spans(read):
@@ -435,6 +455,11 @@ class VariantCaller:
         self.gene_subset = set(gene_subset) if gene_subset is not None else None
         self.het_prefilter_threshold = het_prefilter_threshold
         self._bam_path_cache = {}
+        # Per-gene byte-offset index over the mapping TSVs (fast path for step1).
+        # Populated by _load_gene_index() when a <tsv>.geneidx.tsv sidecar exists;
+        # stays None otherwise, in which case step1 falls back to full _read_mapping.
+        self.gene_index = None
+        self._geneidx_colpos = None
     @staticmethod
     def _ensure_list(x):
         if isinstance(x, str):
@@ -483,7 +508,7 @@ class VariantCaller:
             pieces = defaultdict(list)
             for chunk in pd.read_csv(read_isoform_mapping_path, sep='\t', chunksize=100000):
                 chunk = chunk[chunk['Keep'] == 1][['Read', 'geneName', 'geneID', 'geneChr', 'Cell', 'Umi']]
-                chunk['Read'] = chunk['Read'].str.replace(_READNAME_SUFFIX_RE, '', regex=True)
+                chunk['Read'] = chunk['Read'].map(canonicalize_read_name)
                 for gene_id, sub_df in chunk.groupby('geneID', sort=False):
                     pieces[gene_id].append(sub_df)
                 del chunk
@@ -494,6 +519,63 @@ class VariantCaller:
             mapping_df_list.append(mapping_df_dict)
             del pieces
         return mapping_df_list
+    def _load_gene_index(self):
+        """Load the per-sample geneID -> (byte_offset, byte_length, n_reads_kept)
+        sidecar indexes if every sample has one. Requires a gene-contiguous mapping
+        TSV with a `<tsv>.geneidx.tsv` sidecar (built by the re-sort step). Returns
+        (gene_index_list, colpos_list) where colpos_list holds each sample's (Read,
+        Keep) column positions, or (None, None) if any sidecar is missing so the
+        caller falls back to the full _read_mapping path."""
+        gene_index_list = []
+        colpos_list = []
+        for tsv_path in self.read_isoform_mapping_path:
+            idx_path = tsv_path + '.geneidx.tsv'
+            if not os.path.exists(idx_path):
+                return None, None
+            idx = {}
+            with open(idx_path) as f:
+                for line in f:
+                    parts = line.rstrip('\n').split('\t')
+                    if len(parts) < 4:
+                        continue
+                    gid, off, length, nreads = parts[0], parts[1], parts[2], parts[3]
+                    idx[gid] = (int(off), int(length), int(nreads))
+            with open(tsv_path) as f:
+                header = f.readline().rstrip('\r\n').split('\t')
+            cols = {name: i for i, name in enumerate(header)}
+            if 'Read' not in cols or 'Keep' not in cols:
+                return None, None
+            colpos_list.append((cols['Read'], cols['Keep']))
+            gene_index_list.append(idx)
+        return gene_index_list, colpos_list
+    def _reads_for_gene_block(self, sample_index, geneID):
+        """Fast path: seek to one gene's contiguous byte block in the sample's
+        mapping TSV and return its canonicalized Keep==1 read names. Mirrors the
+        Keep filter + read-name canonicalization done in _read_mapping."""
+        idx = self.gene_index[sample_index].get(geneID)
+        if idx is None:
+            return set()
+        offset, length, _ = idx
+        read_i, keep_i = self._geneidx_colpos[sample_index]
+        ncols = max(read_i, keep_i) + 1
+        with open(self.read_isoform_mapping_path[sample_index], 'rb') as f:
+            f.seek(offset)
+            block = f.read(length)
+        reads = set()
+        for line in block.split(b'\n'):
+            if not line:
+                continue
+            fields = line.split(b'\t')
+            if len(fields) < ncols:
+                # A short line means the byte offsets are wrong (index/file mismatch);
+                # fail loudly rather than silently returning a truncated read set.
+                raise ValueError(
+                    f'malformed mapping block for {geneID} in '
+                    f'{self.read_isoform_mapping_path[sample_index]}: expected '
+                    f'>= {ncols} columns, got {len(fields)}')
+            if _keep_is_one_bytes(fields[keep_i]):
+                reads.add(canonicalize_read_name(fields[read_i].decode()))
+        return reads
     def _get_bam_file_path(self, bam_path, chrom=None):
         if os.path.isfile(bam_path):
             return bam_path
@@ -589,13 +671,19 @@ class VariantCaller:
         #Get per-gene read set
         geneInfo, _, _ = self.geneStructureInformation[geneID]
         reads_set_list = []
-        for mapping_df_dict in self.mapping_df_list:
-            mapping_df_gene = mapping_df_dict.get(geneID)
-            if mapping_df_gene is not None:
-                reads_set = set(mapping_df_gene['Read'].tolist())
-            else:
-                reads_set = set()
-            reads_set_list.append(reads_set)
+        if self.gene_index is not None:
+            # Fast path: seek each sample's gene block instead of holding the whole
+            # mapping in memory. Same Keep==1 + canonicalize filter as _read_mapping.
+            for sample_index in range(self.n_samples):
+                reads_set_list.append(self._reads_for_gene_block(sample_index, geneID))
+        else:
+            for mapping_df_dict in self.mapping_df_list:
+                mapping_df_gene = mapping_df_dict.get(geneID)
+                if mapping_df_gene is not None:
+                    reads_set = set(mapping_df_gene['Read'].tolist())
+                else:
+                    reads_set = set()
+                reads_set_list.append(reads_set)
         return reads_set_list, geneInfo
     def _write_readnames_file(self, geneID):
         reads_set_list, geneInfo = self._reads_set_for_gene(geneID)
@@ -666,6 +754,29 @@ class VariantCaller:
         _het_prefilter_e = 0.01
         _het_prefilter_threshold = self.het_prefilter_threshold
 
+        # Per-call memo for read-name canonicalization. canonicalize_read_name() is a
+        # regex .sub() called once per (read, pileup column) in the inner loops below;
+        # a read spanning many columns would otherwise be re-stripped that many times.
+        # Reads recur across columns and across Pass 1 / Pass 2, so this cache collapses
+        # the regex to one call per distinct read. Output is unchanged; the dict is local
+        # so it never leaks across genes.
+        canon_cache = {}
+        # Per-call memo for decoded read sequences. aln.query_sequence re-decodes the
+        # whole read on every access; a read spanning many pileup columns would decode
+        # its full sequence once per column (O(L^2) on deep genes). Caching the decoded
+        # sequence per alignment makes it O(L). Keyed by (name, flag, reference_start,
+        # reference_end): one primary per read, and supplementary/secondary alignments
+        # carry distinct flags, so this never returns one record's sequence for another.
+        # (id(aln) is unsafe here — pysam rebuilds the AlignedSegment per pileup column,
+        # so it would never cache-hit and could collide via id reuse after GC.)
+        seq_cache = {}
+        # Loud-failure guard (no-silent-skip rule): if a gene has mapping reads
+        # (allowed_reads) but essentially none of the BAM pileup reads match them, the
+        # whole gene silently yields 0 candidates. Track match counts and warn instead
+        # of failing silently — this is exactly the read-name-mismatch signature.
+        n_pileup_seen = 0
+        n_allowed_match = 0
+
         # --- Pass 1: count only, no site_reads collection ---
         rows = []
         bam = self._read_bam(bam_path=[bam_path_gene])
@@ -686,11 +797,25 @@ class VariantCaller:
                 alt_count = 0
                 for pr in col.pileups:
                     aln = pr.alignment
-                    if allowed_reads is not None and canonicalize_read_name(aln.query_name) not in allowed_reads:
+                    qn = aln.query_name
+                    cn = canon_cache.get(qn)
+                    if cn is None:
+                        cn = canonicalize_read_name(qn)
+                        canon_cache[qn] = cn
+                    n_pileup_seen += 1
+                    if allowed_reads is not None and cn not in allowed_reads:
                         continue
+                    n_allowed_match += 1
                     if pr.is_del or pr.is_refskip or pr.query_position is None:
                         continue
-                    seq = aln.query_sequence
+                    # Reuse the read's decoded sequence across the columns it spans
+                    # instead of re-decoding per column. base is identical to the old
+                    # aln.query_sequence[qpos]; only the repeated decode is removed.
+                    seq_key = (qn, aln.flag, aln.reference_start, aln.reference_end)
+                    seq = seq_cache.get(seq_key)
+                    if seq is None:
+                        seq = aln.query_sequence
+                        seq_cache[seq_key] = seq
                     qpos = pr.query_position
                     if seq is None or qpos >= len(seq):
                         continue
@@ -712,6 +837,16 @@ class VariantCaller:
                 rows.append((geneChr, pos0, ref_base, eff_depth, alt_count, alt_count / eff_depth))
         finally:
             bam[0].close()
+
+        if allowed_reads and n_pileup_seen > 0 and n_allowed_match == 0:
+            msg = (f'gene {geneID}: {n_pileup_seen} pileup read-positions covered but '
+                   f'0 matched the {len(allowed_reads)} mapping reads — read-name '
+                   f'mismatch (canonicalize_read_name vs BAM query_name format?). '
+                   f'Gene yields 0 SNVs.')
+            if self.logger is not None:
+                self.logger.warning(msg)
+            else:
+                print('WARNING: ' + msg)
 
         # Filter candidates by depth, alt_count, and het_prob prefilter
         snv_df = pd.DataFrame(rows, columns=["chrom", "pos", "ref", "depth", "alt_count", "alt_frac"])
@@ -753,7 +888,11 @@ class VariantCaller:
                 site_reads = set()
                 for pr in col.pileups:
                     aln = pr.alignment
-                    canonical_qname = canonicalize_read_name(aln.query_name)
+                    qn = aln.query_name
+                    canonical_qname = canon_cache.get(qn)
+                    if canonical_qname is None:
+                        canonical_qname = canonicalize_read_name(qn)
+                        canon_cache[qn] = canonical_qname
                     if allowed_reads is not None and canonical_qname not in allowed_reads:
                         continue
                     mapq = int(aln.mapping_quality) if aln.mapping_quality is not None else 0
@@ -768,11 +907,23 @@ class VariantCaller:
                     qpos = pr.query_position
                     if seq is None or qpos >= len(seq):
                         continue
-                    quals = aln.query_qualities or []
+                    quals = aln.query_qualities
                     base = seq[qpos].upper()
-                    baseq = int(quals[qpos]) if qpos < len(quals) else 0
-                    if baseq < self.min_baseq:
-                        continue
+                    if quals is None:
+                        # Absent base qualities (QUAL='*', e.g. PacBio collapsed/
+                        # filtered scIsoSeq BAMs). Pass 1 delegates baseq filtering
+                        # to pysam's C-level min_base_quality, which PASSES absent-qual
+                        # reads (htslib reads missing QUAL as 0xFF). Mirror that here:
+                        # treating baseq as 0 and applying `< min_baseq` silently
+                        # dropped EVERY read at every candidate site -> empty
+                        # site_reads -> step2 depth=0 -> step3 0-output (Duke 6-25 bug).
+                        # baseq=None flows to step2 q_to_pi() which falls back to a
+                        # conservative 0.25 error prob (~Q6) for non-numeric quality.
+                        baseq = None
+                    else:
+                        baseq = int(quals[qpos]) if qpos < len(quals) else 0
+                        if baseq < self.min_baseq:
+                            continue
                     if self.min_dist_to_end > 0 and read_len > 0:
                         dist = min(qpos, read_len - 1 - qpos)
                         if base != ref_base and dist < self.min_dist_to_end:
@@ -787,13 +938,43 @@ class VariantCaller:
             (row.chrom, int(row.pos)): site_reads_all.get((row.chrom, int(row.pos)), set())
             for row in snv_df.itertuples(index=False)
         }
+        # Loud-failure guard (no-silent-skip rule): every site in snv_df passed Pass 1
+        # depth/alt/het filters, and Pass 1 (C-level min_base_quality) / Pass 2 (manual
+        # baseq, with None pass-through for QUAL='*') are symmetric, so a candidate site
+        # should NEVER come back empty in Pass 2. Any empty site means Pass 2 silently
+        # filtered everything there (residual base-quality asymmetry, read-name mismatch,
+        # unexpected pysam version behavior, ...) -> step2 depth=0. Warn instead of
+        # emitting empty pickles that quietly poison downstream. Fires on PARTIAL
+        # emptiness too, escalating when all sites are empty (-> step3 0-output).
+        n_empty = sum(1 for v in site_reads.values() if not v)
+        if n_empty > 0:
+            tail = ('ALL sites empty -> step3 0-output; do NOT trust this gene.'
+                    if n_empty == len(site_reads)
+                    else 'Investigate before trusting these sites.')
+            msg = (f'gene {geneID}: {n_empty}/{len(site_reads)} candidate SNV sites '
+                   f'collected 0 site_reads in Pass 2 despite passing Pass 1 '
+                   f'depth/alt/het filters (base-quality asymmetry? read-name '
+                   f'mismatch?). Empty site_reads -> step2 depth=0. ' + tail)
+            if self.logger is not None:
+                self.logger.warning(msg)
+            else:
+                print('WARNING: ' + msg)
         site_reads['__del_counts__'] = {
             (row.chrom, int(row.pos)): site_del_counts.get((row.chrom, int(row.pos)), 0)
             for row in snv_df.itertuples(index=False)
         }
         return snv_df, site_reads
     def process_genes_round1_1(self): #initial variant calling
-        self.mapping_df_list = self._read_mapping()  # correspond to scotch output order
+        # Prefer the per-gene byte-offset index: every job loads a few-MB sidecar and
+        # seeks only its chunk's gene blocks, instead of each job re-streaming the
+        # whole mapping TSVs. Falls back to the full in-memory read when no sidecar.
+        self.gene_index, self._geneidx_colpos = self._load_gene_index()
+        if self.gene_index is not None:
+            self.mapping_df_list = None
+            mes = 'using per-gene index (seek mode); skipping full mapping load'
+            print(mes) if self.logger is None else self.logger.info(mes)
+        else:
+            self.mapping_df_list = self._read_mapping()  # correspond to scotch output order
         os.makedirs(self.variants_by_gene_folder_1, exist_ok=True)
         geneIDs = list(self.geneStructureInformation.keys())
         if self.gene_subset is not None:
@@ -802,7 +983,10 @@ class VariantCaller:
         def _gene_cost(g):
             gInfo = self.geneStructureInformation[g][0]
             gene_len = max(1, gInfo['geneEnd'] - gInfo['geneStart'])
-            n_reads = sum(len(d.get(g, [])) for d in self.mapping_df_list)
+            if self.gene_index is not None:
+                n_reads = sum(idx.get(g, (0, 0, 0))[2] for idx in self.gene_index)
+            else:
+                n_reads = sum(len(d.get(g, [])) for d in self.mapping_df_list)
             return gene_len * max(1, n_reads)
         gene_costs = [(g, _gene_cost(g)) for g in geneIDs]
         gene_costs.sort(key=lambda x: -x[1])  # descending by cost
@@ -1408,7 +1592,14 @@ class Haplotyping:
         """Extract per-SNV features from cached site_reads for the classifier.
         site_reads_dict: {(chrom, pos): set of tuples} from step 1 site_reads.pkl.
         Tuples are (read_name, qpos, base, baseq, mapq, read_len, is_reverse).
-        Returns DataFrame with SNV_CLF_FEATURE_COLUMNS, aligned to df_pileup_filtered index."""
+        Returns DataFrame with SNV_CLF_FEATURE_COLUMNS, aligned to df_pileup_filtered index.
+
+        NOTE: baseq may be None for BAMs without per-base qualities (QUAL='*', e.g.
+        PacBio collapsed/filtered scIsoSeq BAMs). Such reads are kept (for depth/strand
+        features) but contribute no mean_bq_alt/mean_bq_ref signal; if EVERY read lacks
+        QUAL these two features degenerate to 0.0. The SNV classifier is trained on real
+        base qualities, so it should be considered UNSUPPORTED on all-QUAL='*' BAMs —
+        run those without --snv_confidence_path."""
         rows = []
         for row in df_pileup_filtered.itertuples(index=False):
             chrom = str(row.chrom)
@@ -1428,7 +1619,9 @@ class Haplotyping:
 
             for _read_name, qpos, base, baseq, mapq, read_len, is_reverse in tuples:
                 base = str(base).upper()
-                baseq = int(baseq)
+                # baseq may be None for BAMs without per-base qualities (QUAL='*');
+                # keep it out of the mean-BQ features rather than crashing on int(None).
+                baseq = int(baseq) if baseq is not None else None
                 mapq = int(mapq)
                 read_len = int(read_len)
                 is_reverse = int(is_reverse)
@@ -1440,7 +1633,8 @@ class Haplotyping:
                 if base != ref_base:
                     alt_base_counts[base] += 1
                 if base == alt_base:
-                    alt_bqs.append(baseq)
+                    if baseq is not None:
+                        alt_bqs.append(baseq)
                     if read_len > 1:
                         alt_positions.append(float(qpos) / max(read_len - 1, 1))
                     if is_reverse:
@@ -1448,7 +1642,8 @@ class Haplotyping:
                     else:
                         alt_fwd += 1
                 elif base == ref_base:
-                    ref_bqs.append(baseq)
+                    if baseq is not None:
+                        ref_bqs.append(baseq)
                     if is_reverse:
                         ref_rev += 1
                     else:
@@ -1565,7 +1760,15 @@ class Haplotyping:
                 base = str(base).upper()
                 if base not in {'A', 'C', 'G', 'T'}:
                     continue
-                e = float(np.clip(10.0 ** (-int(baseq) / 10.0), 0.001, 0.5))
+                # baseq may be None for BAMs without per-base qualities (QUAL='*').
+                # Fall back to an unknown-quality error prob of 0.25 (~Q6; matches
+                # step2 q_to_pi) instead of crashing on int(None). Note this is a
+                # conservative fallback, not truly neutral — the allele is still treated
+                # as informative in the EM, just down-weighted.
+                if baseq is None:
+                    e = 0.25
+                else:
+                    e = float(np.clip(10.0 ** (-int(baseq) / 10.0), 0.001, 0.5))
                 p_match_het = 0.5 * (1.0 - e) + 0.5 * (e / 3.0)
                 p_err = e / 3.0
                 if base == ref_base:
@@ -1684,7 +1887,7 @@ class Haplotyping:
             pieces = defaultdict(list)
             for chunk in pd.read_csv(read_isoform_mapping_path, sep='\t', chunksize=100000):
                 chunk = chunk[chunk['Keep'] == 1][['Read', 'geneName', 'geneID', 'Isoform', 'Cell', 'Umi']]
-                chunk['Read'] = chunk['Read'].str.replace(_READNAME_SUFFIX_RE, '', regex=True)
+                chunk['Read'] = chunk['Read'].map(canonicalize_read_name)
                 for gene_id, sub_df in chunk.groupby('geneID', sort=False):
                     pieces[gene_id].append(sub_df)
                 del chunk  # release memory for the current chunk
@@ -2448,7 +2651,7 @@ class Haplotyping:
             geneIDs_job = np.array_split(self.geneIDs, self.n_jobs)[self.job_index]
             mes = f'{len(geneIDs_job)} genes in this job for sample index {i}'
             print(mes) if self.logger is None else self.logger.info(mes)
-            Parallel(n_jobs=self.n_workers)(delayed(self._generate_count_hap_gene_safe)(geneID, i) for geneID in geneIDs_job)
+            Parallel(n_jobs=self.n_workers, prefer='threads')(delayed(self._generate_count_hap_gene_safe)(geneID, i) for geneID in geneIDs_job)
             mes = f'job {self.job_index} finished for sample index {i}'
             print(mes) if self.logger is None else self.logger.info(mes)
     def _process_count_gene(self, hapA_file):
