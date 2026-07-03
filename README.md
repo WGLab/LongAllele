@@ -29,6 +29,8 @@ pip install -r requirements.txt
 
 ## Quickstart
 
+We provide a small [toy example](examples/pbmc_demo) for a quick start with LongAllele — clone the repo and run the full pipeline (step1 → step5) end to end in a few minutes, no external data needed.
+
 LongAllele runs on HPC clusters via SLURM. The bundled `longallele.sh` script submits all pipeline steps as a dependency-chained job graph — one command is all you need.
 
 **1. Fill in your paths and basic parameter settings:**
