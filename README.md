@@ -12,6 +12,8 @@ Allele-specific analysis from RNA-seq is a powerful approach to characterize *ci
 
 Here, we present **LongAllele**, a statistical framework that employs an expectation–maximization algorithm to jointly infer heterozygous variants, haplotype structure, and read-haplotype assignments from long-read bulk and single-cell RNA sequencing. LongAllele further introduces **phasability-aware testing** that explicitly accounts for non-phasable reads, avoiding inflated false-positive calls when haplotype information is incomplete. It also enables **comprehensive allelic testing** across gene-level allele-specific expression (**ASE**), isoform-level allele-specific transcript usage (**ASTU**), and local-event-level haplotype-associated exon and junction usage (**HAEU** and **HAJU**), providing a multi-scale view of *cis*-regulation. LongAllele offers a unified framework for haplotype-resolved *cis*-regulatory analysis across diverse cellular contexts.
 
+Code to reproduce the analyses and figures in the manuscript is available at [WGLab/LongAllele_Analysis](https://github.com/WGLab/LongAllele_Analysis/tree/main).
+
 <p align="center">
   <img src="assets/figure1.png" alt="LongAllele overview" width="900">
 </p>
