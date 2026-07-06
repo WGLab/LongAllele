@@ -14,6 +14,7 @@ from scipy.stats import chi2
 from scipy.special import gammaln
 import subprocess
 import tempfile
+import threading
 from collections.abc import Iterable
 from joblib import Parallel, delayed, load as joblib_load
 from src.statistical_test import observed_loglikelihood, run_em_fixed_alpha
@@ -1429,6 +1430,10 @@ class Haplotyping:
         self.alt_cluster_filter = alt_cluster_filter
         self.repeat_filter_kmer = repeat_filter_kmer
         self.fasta_handle = pysam.FastaFile(ref_fasta_path) if ref_fasta_path is not None else None
+        # pysam.FastaFile shares one htslib file handle with a mutable seek offset and is not
+        # thread-safe; step3 fans genes out with Parallel(prefer='threads'), so every fetch on
+        # this shared handle must be serialized to avoid concurrent seeks returning wrong sequence.
+        self._fasta_lock = threading.Lock()
         self.n_jobs = n_jobs
         self.job_index = job_index
         self.target = target #root folder for long allele results
@@ -1670,10 +1675,11 @@ class Haplotyping:
             is_transition = 0
             if self.fasta_handle is not None:
                 try:
-                    chrom_len = self.fasta_handle.get_reference_length(chrom)
-                    fetch_start = max(0, pos0 - 5)
-                    fetch_end = min(chrom_len, pos0 + 6)
-                    seq = self.fasta_handle.fetch(chrom, fetch_start, fetch_end).upper()
+                    with self._fasta_lock:  # serialize access to shared (thread-unsafe) FastaFile handle
+                        chrom_len = self.fasta_handle.get_reference_length(chrom)
+                        fetch_start = max(0, pos0 - 5)
+                        fetch_end = min(chrom_len, pos0 + 6)
+                        seq = self.fasta_handle.fetch(chrom, fetch_start, fetch_end).upper()
                     if len(seq) < 11:
                         seq = seq + 'N' * (11 - len(seq))  # pad to match training
                     snv_idx = pos0 - fetch_start
@@ -2255,12 +2261,13 @@ class Haplotyping:
         if len(df_pileup_filtered) > 0 and self.snv_confidence is None and self.fasta_handle is not None:
             df_pileup_filtered = df_pileup_filtered.sort_values(by=['pos']).reset_index(drop=True)
             chrom = df_pileup_filtered.chrom[0]
-            chrom_len = self.fasta_handle.get_reference_length(chrom)
-            is_stretch = [0] * len(df_pileup_filtered)
-            positions = df_pileup_filtered['pos'].astype(int).tolist()
-            fetch_start = max(0, min(positions) - 20)
-            fetch_end = min(chrom_len, max(positions) + 21)
-            stretch_seq = self.fasta_handle.fetch(chrom, fetch_start, fetch_end).upper()
+            with self._fasta_lock:  # serialize access to shared (thread-unsafe) FastaFile handle
+                chrom_len = self.fasta_handle.get_reference_length(chrom)
+                is_stretch = [0] * len(df_pileup_filtered)
+                positions = df_pileup_filtered['pos'].astype(int).tolist()
+                fetch_start = max(0, min(positions) - 20)
+                fetch_end = min(chrom_len, max(positions) + 21)
+                stretch_seq = self.fasta_handle.fetch(chrom, fetch_start, fetch_end).upper()
             for i in range(len(df_pileup_filtered)):
                 pos_ = int(df_pileup_filtered.iloc[i]['pos'])
                 start, end = max(0, pos_ - 20), min(chrom_len, pos_ + 21)
