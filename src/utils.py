@@ -2026,7 +2026,8 @@ class Haplotyping:
 
     @staticmethod
     def _load_rna_editing_db(path):
-        if path is None:
+        # sentinel values disable RNA editing filtering entirely
+        if path is None or str(path).strip().lower() in ('', 'none'):
             return None
         with np.load(path, allow_pickle=True) as data:
             db = {

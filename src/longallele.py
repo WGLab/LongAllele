@@ -73,7 +73,7 @@ parser.add_argument(
     '--rna_editing_db',
     type=str,
     default=os.path.join(os.path.dirname(__file__), 'rna_editing_hg38.npz'),
-    help='Path to compact RNA editing DB (.npz). Default: bundled hg38 database.'
+    help="Path to compact RNA editing DB (.npz). Default: bundled hg38 database. Pass 'none' (or empty) to disable RNA editing filtering."
 )
 #gene subset: plain-text file with one geneID per line
 parser.add_argument('--gene_subset_path', type=str)
