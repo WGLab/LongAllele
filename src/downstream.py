@@ -959,9 +959,13 @@ class Downstream:
         ct_rows['gene_alpha_hat_major_low'] = 1 - ct_rows['gene_alpha_hat_high']
         ct_rows['gene_alpha_hat_major_high'] = 1 - ct_rows['gene_alpha_hat_low']
         ct_rows['gene_major_hap'] = ct_rows['major_hap']
+        # The fallback is the string 'nan', not np.nan: NumPy 1.x promoted the
+        # float into the string dtype and stored it as 'nan' anyway, and NumPy 2
+        # refuses the promotion outright. Spelling it out keeps the output
+        # identical on both.
         ct_rows['gene_minor_hap'] = np.where(
             ct_rows['gene_major_hap'] == 'A', 'B',
-            np.where(ct_rows['gene_major_hap'] == 'B', 'A', np.nan)
+            np.where(ct_rows['gene_major_hap'] == 'B', 'A', 'nan')
         )
         ct_rows['gene_p_value'] = pd.to_numeric(ct_rows['p_value'], errors='coerce')
         ct_rows['gene_p_value_adj'] = pd.to_numeric(ct_rows['p_value_gene_adj'], errors='coerce')

@@ -18,6 +18,14 @@ bash run_demo.sh          # writes ./demo_output/
 
 Compare `demo_output/` against the shipped reference in `expected_output/`.
 
+`expected_output/` was produced with the pinned versions in `requirements.txt`.
+Compare it numerically rather than byte for byte: step 3 runs the EM across all
+available cores, so the order of the parallel reductions shifts the last
+iteration slightly and a few values move by ~1e-4 (p-values by ~3e-3) between
+runs on the same machine. The ASE/ASTU calls in the table below are unaffected —
+those are what the demo is meant to reproduce. Older library versions stay
+within the same calls but move individual numbers considerably more.
+
 ## Inputs
 
 | Path | What it is |

@@ -1,8 +1,13 @@
-pysam>=0.20
-numpy>=1.20
-scipy>=1.7
-pandas>=1.3
-scikit-learn>=1.0
-anndata>=0.8
-statsmodels>=0.13
-joblib>=1.1
+# Pinned to the environment that produced examples/pbmc_demo/expected_output.
+# The EM converges to slightly different points across library versions, so an
+# unpinned install still reproduces the demo's ASE/ASTU calls but not its exact
+# numbers. Relax these if you need to fit an existing cluster environment.
+pysam==0.24.0
+numpy==2.4.6
+scipy==1.17.1
+pandas==2.3.3
+scikit-learn==1.9.0
+anndata==0.12.19
+statsmodels==0.14.6
+joblib==1.5.3
+xgboost==3.2.0

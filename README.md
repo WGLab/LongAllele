@@ -50,6 +50,14 @@ bash longallele.sh my_run.sh
 
 That's it. All steps are submitted with correct SLURM dependencies and run automatically in order. Output lands in `OUTPUT_DIR` once all jobs complete.
 
+To review the commands before anything is queued, prefix the run with `DRY_RUN=1` — each `sbatch` invocation is printed instead of submitted:
+
+```bash
+DRY_RUN=1 bash longallele.sh my_run.sh
+```
+
+`longallele.sh` locates the pipeline relative to its own path, so it can be launched from any directory; SLURM logs are written to `logs/` under whichever directory you launch it from.
+
 See [Per-step pipeline](#per-step-pipeline) for per-step documentation and all configurable arguments.
 
 ## Per-step pipeline
@@ -77,6 +85,15 @@ Step 5: Downstream analysis ◄────────────────�
 
 ### Step 1 — Variant calling
 This step generates initial heterozygous SNV candidates from per-gene pileup of the aligned BAM.
+
+```bash
+python src/longallele.py --task step1 \
+    --scotch_target /path/to/scotch_output \
+    --bam_path /path/to/aligned.bam \
+    --ref_fasta_path /path/to/genome.fa \
+    --output_folder /path/to/results \
+    --n_jobs N --job_index $SLURM_ARRAY_TASK_ID
+```
 
 <details open>
 <summary><b>Parallelization</b></summary>
@@ -149,6 +166,15 @@ python src/longallele.py --task step1_5_merge \
 ### Step 2 — EM input generation
 This step prepares the per-gene read profile and error profile used as input by the EM in step 3.
 
+```bash
+python src/longallele.py --task step2 \
+    --scotch_target /path/to/scotch_output \
+    --bam_path /path/to/aligned.bam \
+    --ref_fasta_path /path/to/genome.fa \
+    --output_folder /path/to/results \
+    --n_jobs N --job_index $SLURM_ARRAY_TASK_ID
+```
+
 <details open>
 <summary><b>Parallelization</b></summary>
 
@@ -174,6 +200,16 @@ A `step2_job{N}.done` marker is written to `{output_folder}/job_markers/` for ea
 
 ### Step 3 — EM haplotyping
 This step jointly infers heterozygous variants, haplotype structure, and read–haplotype assignment per gene via expectation–maximization.
+
+```bash
+python src/longallele.py --task step3 \
+    --scotch_target /path/to/scotch_output \
+    --bam_path /path/to/aligned.bam \
+    --ref_fasta_path /path/to/genome.fa \
+    --output_folder /path/to/results \
+    --snv_classifier src/models/snv_classifier_ont_hg001_17feat.joblib --clf_init \
+    --n_jobs N --job_index $SLURM_ARRAY_TASK_ID
+```
 
 **Key flags to set for real data:**
 - `--clf_init` — use SNV classifier scores to initialize haplotype priors. **Recommended for all real-data runs.**
@@ -295,6 +331,13 @@ A `step3_job{N}.done` marker is written to `{output_folder}/job_markers/` for ea
 ### Step 4 — Summary statistics + count matrix
 This step aggregates per-gene haplotype statistics and produces haplotype-aware count matrices at both gene and isoform levels (bulk + per cell type).
 
+```bash
+python src/longallele.py --task step4 \
+    --scotch_target /path/to/scotch_output \
+    --output_folder /path/to/results \
+    --summary_haplotype --summary_count
+```
+
 <details open>
 <summary><b>Parallelization</b></summary>
 
@@ -397,6 +440,14 @@ Both `--summary_haplotype` and `--summary_count` are flags that default to off �
 
 ### Step 5 — Downstream analysis
 This step computes per-SNV and per-event allelic effect sizes (ASE, ASTU) and haplotype–event association tests, and links nearby SNVs to their events.
+
+```bash
+python src/longallele.py --task step5 \
+    --scotch_target /path/to/scotch_output \
+    --bam_path /path/to/aligned.bam \
+    --output_folder /path/to/results \
+    --n_workers 8
+```
 
 <details open>
 <summary><b>Parallelization</b></summary>
