@@ -7,7 +7,7 @@ import pandas as pd
 from scipy.stats import chi2_contingency, binomtest
 from statsmodels.stats.multitest import multipletests
 from joblib import Parallel, delayed
-from src.compat import _collapse_legacy_merge_suffixes
+from src.compat import _collapse_legacy_merge_suffixes, resolve_scotch_auxiliary_tsv
 from src.utils import canonicalize_read_name as _canonicalize_read_name
 
 
@@ -2718,12 +2718,7 @@ class Downstream:
                 downstream_output = (os.path.join(self.output_folder, sample_name, f'downstream_{pfx}') if pfx
                                      else os.path.join(self.output_folder, sample_name, 'downstream'))
 
-            if self.sample_name_parse:
-                scotch_tsv_path = os.path.join(
-                    scotch_target,
-                    f'samples/{self.sample_name_parse}/auxillary/all_read_isoform_exon_mapping.tsv')
-            else:
-                scotch_tsv_path = os.path.join(scotch_target, 'auxillary/all_read_isoform_exon_mapping.tsv')
+            scotch_tsv_path = resolve_scotch_auxiliary_tsv(scotch_target, self.sample_name_parse or None)
 
             configs.append({
                 'sample_name': sample_name,

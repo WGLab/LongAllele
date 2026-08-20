@@ -153,12 +153,16 @@ def resolve_read_hap_path(longallele_path, gene_name, gene_id=None, prefix=None)
 
 
 def resolve_scotch_tsv(scotch_target, sample_id):
+    # SCOTCH renamed its 'auxillary' output directory to 'auxiliary'; accept both.
     candidates = [
         os.path.join(
             scotch_target,
-            f"samples/{sample_id}/auxillary/all_read_isoform_exon_mapping.tsv",
-        ),
-        os.path.join(scotch_target, "auxillary/all_read_isoform_exon_mapping.tsv"),
+            f"samples/{sample_id}/{aux}/all_read_isoform_exon_mapping.tsv",
+        )
+        for aux in ("auxiliary", "auxillary")
+    ] + [
+        os.path.join(scotch_target, f"{aux}/all_read_isoform_exon_mapping.tsv")
+        for aux in ("auxiliary", "auxillary")
     ]
     for path in candidates:
         if os.path.exists(path):

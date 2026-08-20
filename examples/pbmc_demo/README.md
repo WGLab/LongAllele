@@ -32,7 +32,7 @@ within the same calls but move individual numbers considerably more.
 |------|-----------|
 | `demo.bam` (+ `.bai`) | Aligned long reads for the 10 demo genes |
 | `scotch_target/reference/geneStructureInformationupdated.pkl` | SCOTCH gene/isoform structure (the pickle LongAllele loads) |
-| `scotch_target/auxillary/all_read_isoform_exon_mapping.tsv` | Read → gene/isoform map from SCOTCH |
+| `scotch_target/auxiliary/all_read_isoform_exon_mapping.tsv` | Read → gene/isoform map from SCOTCH (the legacy `auxillary` spelling from older SCOTCH versions is also accepted) |
 | `ref/chr22.fa.gz` (+ `.fai` `.gzi`) | Reference sequence, chr22 only |
 | `sample7_celltype.csv` | Cell barcode → cell type (for per-cell-type results) |
 

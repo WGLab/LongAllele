@@ -1,4 +1,31 @@
+import os
+
 import pandas as pd
+
+# SCOTCH renamed its output directory from the misspelled 'auxillary' to
+# 'auxiliary'; probe the current spelling first, then the legacy one.
+_SCOTCH_AUXILIARY_DIR_NAMES = ('auxiliary', 'auxillary')
+
+
+def resolve_scotch_auxiliary_tsv(scotch_target, sample_name_parse=None):
+    """Locate SCOTCH's all_read_isoform_exon_mapping.tsv under scotch_target,
+    accepting both auxiliary-directory spellings. Returns the first existing
+    candidate, or the current-spelling path when none exists yet."""
+    if sample_name_parse is not None:
+        candidates = [
+            os.path.join(scotch_target, 'samples', str(sample_name_parse), aux,
+                         'all_read_isoform_exon_mapping.tsv')
+            for aux in _SCOTCH_AUXILIARY_DIR_NAMES
+        ]
+    else:
+        candidates = [
+            os.path.join(scotch_target, aux, 'all_read_isoform_exon_mapping.tsv')
+            for aux in _SCOTCH_AUXILIARY_DIR_NAMES
+        ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[0]
 
 
 def _normalize_legacy_merge_series(series):

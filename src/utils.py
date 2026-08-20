@@ -6,6 +6,7 @@ import pickle
 import numpy as np
 import anndata as ad
 from src.inference import run_em, compute_P_het
+from src.compat import resolve_scotch_auxiliary_tsv
 from scipy import sparse
 from scipy.io import mmwrite
 from typing import Union, Sequence
@@ -428,10 +429,7 @@ class VariantCaller:
         self.sample_names = [os.path.basename(st) if sample_names is None else sample_names for st in self.scotch_target]
         self.n_samples = len(self.scotch_target)
         self.bam_path = self._ensure_list(bam_path)
-        if self.sample_name_parse is not None:
-            self.read_isoform_mapping_path = [os.path.join(st, f'samples/{str(sample_name_parse)}/auxillary/all_read_isoform_exon_mapping.tsv') for st in scotch_target]
-        else:
-            self.read_isoform_mapping_path = [os.path.join(st, 'auxillary/all_read_isoform_exon_mapping.tsv') for st in scotch_target]
+        self.read_isoform_mapping_path = [resolve_scotch_auxiliary_tsv(st, self.sample_name_parse) for st in self.scotch_target]
         self.variant_align_folder_path1 = os.path.join(self.target, "variant_align1")
         self.bam_by_gene_folder_1 = os.path.join(self.variant_align_folder_path1, 'bam_by_gene')
         self.reads_by_gene_folder_1 = os.path.join(self.variant_align_folder_path1, 'reads_by_gene')
@@ -1464,10 +1462,9 @@ class Haplotyping:
             self.geneStructureInformation = _load_gene_structure_information(gsi_path, self.logger)
         self.prefix = prefix or None
         if self.sample_name_parse is not None:
-            self.read_isoform_mapping_path_list = [os.path.join(self.scotch_target[0],
-                                                          f'samples/{str(self.sample_name_parse)}/auxillary/all_read_isoform_exon_mapping.tsv')]
+            self.read_isoform_mapping_path_list = [resolve_scotch_auxiliary_tsv(self.scotch_target[0], self.sample_name_parse)]
         else:
-            self.read_isoform_mapping_path_list = [os.path.join(self.scotch_target[i], 'auxillary/all_read_isoform_exon_mapping.tsv') for i in range(self.n_samples)]
+            self.read_isoform_mapping_path_list = [resolve_scotch_auxiliary_tsv(self.scotch_target[i]) for i in range(self.n_samples)]
         #self.mapping_df_dict_list = self._read_mapping()
         self.em_input = os.path.join(self.target, 'em_input')
         # em settings
