@@ -1,7 +1,6 @@
-# Pinned to the environment that produced examples/pbmc_demo/expected_output.
-# The EM converges to slightly different points across library versions, so an
-# unpinned install still reproduces the demo's ASE/ASTU calls but not its exact
-# numbers. Relax these if you need to fit an existing cluster environment.
+# Pinned to the environment used to generate examples/pbmc_demo/expected_output.
+# Use these versions to reproduce the provided numerical outputs exactly;
+# other numerical-library versions may introduce minor floating-point differences.
 pysam==0.24.0
 numpy==2.4.6
 scipy==1.17.1
