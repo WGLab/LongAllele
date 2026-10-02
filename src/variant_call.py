@@ -7,10 +7,9 @@ import src.utils as u
 import argparse
 
 
-
 parser = argparse.ArgumentParser(description='Variant Call')
 parser.add_argument('--task', type=str)
-parser.add_argument('--output_folder', type=str) #a single output folder to store joint-called variants
+parser.add_argument('--output_folder', type=str)
 parser.add_argument('--scotch_target', type=str, nargs='+')
 parser.add_argument('--sample_names', type=str, nargs='+')
 parser.add_argument('--bam_path', type=str, nargs='+')
@@ -26,7 +25,7 @@ parser.add_argument('--depth', type=int, default=5)
 def main():
     global args
     args = parser.parse_args()
-    #realignment = True if args.realignment==1 else False
+
     vc = u.VariantCaller(scotch_target = args.scotch_target, bam_path= args.bam_path,
                          ref_fasta_path = args.ref_fasta_path, ref_pickle_path = args.ref_pickle_path,
                          target = args.output_folder,
@@ -35,10 +34,9 @@ def main():
                          sample_name_parse = args.sample_name_parse,
                          sample_names = args.sample_names)
     if args.task=='initial call':
-        vc.process_genes_round1_1() # job array
+        vc.process_genes_round1_1()
     if args.task=="generate input":
-        vc.process_genes_final()  # job array
-
+        vc.process_genes_final()
 
 
 if __name__ == "__main__":

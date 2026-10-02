@@ -27,26 +27,26 @@ parser.add_argument('--chi_group_novel',action='store_true')
 parser.add_argument('--ref_pickle_path', type=str)
 parser.add_argument('--var_cluster_window', type=int, default=20)
 parser.add_argument('--var_cluster_n', type=int, default=3)
-parser.add_argument('--heterozygous_filter', type=float, default=0.95) #set negative: no filter, set 0: auto filter top n (conservative), or set a positive value
+parser.add_argument('--heterozygous_filter', type=float, default=0.95)
 parser.add_argument('--alt_stretch_filter', type=int, default=20)
 parser.add_argument('--repeat_filter_kmer', type=int, default=1)
 parser.add_argument('--alt_cluster_filter', type=int, default=20)
 parser.add_argument('--ref_fasta_path', type=str)
-parser.add_argument('--em_snv_filter',action='store_true') #whether to post-filter
+parser.add_argument('--em_snv_filter',action='store_true')
 parser.add_argument('--sample_name_parse',type=str)
 parser.add_argument('--prefix',type=str)
 
-#predefined snv set
+
 parser.add_argument('--snv_confidence_path', type=str)
 parser.add_argument(
     '--rna_editing_db',
     type=str,
     help='Path to compact RNA editing DB (.npz, 0-based positions, keys like AG__chr1 / TC__chr1).'
 )
-#Cell CellType mappipng df
+
 parser.add_argument('--cell_type_df_path', type=str)
 
-# --- high_artifact_mode (Knob B + Knob C; opt-in for lr-snRNA-seq nascent leak) ---
+
 parser.add_argument('--high_artifact_mode', action='store_true',
                     help='Enable Knob B (gene-level SCOTCH-novel SNV mask) + Knob C (read-level '
                          'nascent / pre-mRNA filter) at step3. Default OFF preserves the standard '
@@ -65,7 +65,6 @@ parser.add_argument('--gsi_base_pkl_path', type=str, default=None,
                          '--high_artifact_mode (auto-resolved from scotch_target[0]/reference/ '
                          'if omitted).')
 
-#the order is haplotyping, summary
 
 def main():
     global args
@@ -96,7 +95,6 @@ def main():
         ht.get_summary_statistics()
         print('generating count matrix')
         ht.generate_count_matrix()
-
 
 
 if __name__ == "__main__":

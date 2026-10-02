@@ -53,7 +53,6 @@ def parse_args():
 
 
 def _prefixed_dir_names(base, prefix):
-    """Return candidate directory names: prefixed first, then bare."""
     names = []
     if prefix is not None:
         names.append(f"{base}_{prefix}")
@@ -153,7 +152,7 @@ def resolve_read_hap_path(longallele_path, gene_name, gene_id=None, prefix=None)
 
 
 def resolve_scotch_tsv(scotch_target, sample_id):
-    # SCOTCH renamed its 'auxillary' output directory to 'auxiliary'; accept both.
+
     candidates = [
         os.path.join(
             scotch_target,

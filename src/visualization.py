@@ -38,12 +38,12 @@ def generate_bam_by_hap(geneName, bamFile, scotch_target, longallele_path, selec
     transcript_ids_novel = [t for t in transcript_ids.unique().tolist()[1:] if t.startswith('novel') and t in selected_isoform]
     selected_isoform = transcript_ids_known + transcript_ids_novel
     filtered_gtf = pd.concat([filtered_gtf.iloc[[0]], filtered_gtf[transcript_ids.isin(selected_isoform)]], ignore_index=True)
-    # write bam file
-    if os.path.isfile(bamFile)==False: #bamFile is a folder
+
+    if os.path.isfile(bamFile)==False:
         bamFile_name = [f for f in os.listdir(bamFile) if f.endswith('.bam') and '.'+gene_chr+'.' in f]
         bamFile = os.path.join(bamFile,bamFile_name[0])
     bamFilePysam = pysam.Samfile(bamFile, "rb")
-    #-------------------write bam files------------------#
+
     bam_path_hapA=os.path.join(out_folder, f'{geneName}_hapA.bam')
     bam_path_hapB = os.path.join(out_folder,f'{geneName}_hapB.bam')
     outA = pysam.AlignmentFile(bam_path_hapA, "wb", template=bamFilePysam)
@@ -67,7 +67,3 @@ def generate_bam_by_hap(geneName, bamFile, scotch_target, longallele_path, selec
         os.replace(sorted_p, p)
         subprocess.run(["samtools", "index", p], check=True)
     filtered_gtf.to_csv(os.path.join(out_folder, f'{geneName}_SCOTCH_filtered.gtf'), sep='\t', index=False, header=False,quoting=3)
-
-
-
-
