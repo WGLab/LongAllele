@@ -73,7 +73,8 @@ def actv_gate_flags(gene_snv_df, axis):
     if g.empty:
         return {}
     col = 'gene_p_value' if axis == 'ase' else 'isoform_p_value'
-    ok = pd.to_numeric(g[col], errors='coerce') <= .05
+    n_contexts = g.groupby('geneID')['CellType'].transform('nunique')
+    ok = pd.to_numeric(g[col], errors='coerce') <= .05 / n_contexts
     return ok.groupby(g['geneID']).any().to_dict()
 
 
@@ -236,7 +237,12 @@ def _actv_gene_task(gene_id, gene_name, sample, unit, inputs, gene_rows,
                 res.update(stat)
                 qualifying = json.loads(stat['qualifying_contexts'])
                 if stat['eligible_cells']:
-                    selected = gene_rows[gene_rows.CellType.isin(qualifying)]
+
+
+                    selected = (gene_rows.drop_duplicates('CellType')
+                                .set_index('CellType').reindex(qualifying)
+                                .rename_axis('CellType').reset_index())
+                    selected['geneID'] = gene_id
 
 
                     res['ase_sig_ct'] = bool(actv_gate_flags(selected, 'ase').get(gene_id, False))
