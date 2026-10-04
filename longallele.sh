@@ -38,7 +38,7 @@ source "$CONFIG"
 # Every variable here must carry a value: an empty one would silently fall back
 # to the argparse default in src/longallele.py, which is exactly the failure
 # mode this script is meant to avoid. Legitimately optional variables
-# (CELL_TYPE_DF, PREFIX, RNA_EDITING_DB, EXTRA_OPTS) are handled below.
+# (CELL_TYPE_DF, PREFIX, RNA_EDITING_DB, SR_BAM, EXTRA_OPTS) are handled below.
 RUNNER="${RUNNER:-slurm}"
 INPUT="${INPUT:-scotch}"
 # Booleans arrive from the config as the strings "true"/"false". They must be
@@ -117,6 +117,13 @@ BULK_OPT=""
 # lightweight: placeholder isoforms make the isoform chi-squared meaningless
 LIGHT_STEP3_OPT=""
 [[ "$INPUT" == "light" ]] && LIGHT_STEP3_OPT="--skip_astu_test"
+# reference annotation for the exon/intron SNV labels in step 3 (all inputs)
+GTF_OPT=""
+if [[ -n "${GTF:-}" ]]; then
+    GTF_OPT="--gtf_path \"$GTF\""
+else
+    echo "Warning: 'GTF' is not set in $CONFIG; step 3 cannot label SNVs exonic/intronic (snv_region_label will be unknown)"
+fi
 case "$PLATFORM" in
     ont-cdna|ont-drna|hifi-isoseq|hifi-masseq|other) ;;
     *)  echo "Error: PLATFORM must be one of ont-cdna, ont-drna, hifi-isoseq, hifi-masseq, other in $CONFIG (got: '$PLATFORM')"
@@ -152,6 +159,31 @@ ASTU_OPT=""
 [[ "${ASTU_SIG_ONLY:-false}" == "true" ]] && ASTU_OPT="--astu_sig_only"
 EM_OPTS="--seed $SEED --max_iter $MAX_ITER --tol $TOL --gap_tau $GAP_TAU"
 RNA_OPT="${RNA_EDITING_DB:+--rna_editing_db \"$RNA_EDITING_DB\"}"
+SR_OPT=""
+if [[ -n "${SR_BAM:-}" ]]; then
+    read -r -a SR_BAMS <<< "$SR_BAM"
+    if [[ "${#SR_BAMS[@]}" -ne 1 && "${#SR_BAMS[@]}" -ne "$N_SAMPLES" ]]; then
+        echo "Error: SR_BAM must contain one shared BAM or N_SAMPLES=$N_SAMPLES paths in BAM_PATH order"
+        exit 1
+    fi
+    SR_MIN_DEPTH="${SR_MIN_DEPTH:-30}"
+    SR_MAX_ALT="${SR_MAX_ALT:-1}"
+    SR_MIN_MAPQ="${SR_MIN_MAPQ:-20}"
+    SR_MIN_BASEQ="${SR_MIN_BASEQ:-20}"
+    for var in SR_MIN_DEPTH SR_MAX_ALT SR_MIN_MAPQ SR_MIN_BASEQ; do
+        if [[ ! "${!var}" =~ ^[0-9]+$ ]]; then
+            echo "Error: $var must be a non-negative integer in $CONFIG"
+            exit 1
+        fi
+    done
+    if [[ ! "$SR_MIN_DEPTH" =~ [1-9] ]]; then
+        echo "Error: SR_MIN_DEPTH must be at least 1 in $CONFIG"
+        exit 1
+    fi
+    # Quote each path for both the local eval and SLURM's --wrap shell.
+    printf -v SR_OPT ' %q' "${SR_BAMS[@]}"
+    SR_OPT="--sr_bam$SR_OPT --sr_min_depth $SR_MIN_DEPTH --sr_max_alt $SR_MAX_ALT --sr_min_mapq $SR_MIN_MAPQ --sr_min_baseq $SR_MIN_BASEQ"
+fi
 EXTRA="${EXTRA_OPTS:-}"
 # Everything that is common to every step.
 COMMON="$CALL_OPTS $SI_OPT $PREFIX_OPT $EXTRA"
@@ -176,7 +208,7 @@ args_step1()        { echo "--task step1 $IO_OPTS --n_jobs $N_GENE_JOBS --job_in
 args_step1_5()      { echo "--task step1_5 $IO_OPTS --n_jobs $N_15 --job_index $1 $COMMON"; }
 args_step1_5_merge(){ echo "--task step1_5_merge $IO_OPTS $COMMON"; }
 args_step2()        { echo "--task step2 $IO_OPTS --n_jobs $N_GENE_JOBS --job_index $1 $COMMON"; }
-args_step3()        { echo "--task step3 $IO_OPTS --n_jobs $N_GENE_JOBS --job_index $1 $COMMON $EM_OPTS $RNA_OPT $HAF_OPT $CELL_OPT $LIGHT_STEP3_OPT"; }
+args_step3()        { echo "--task step3 $IO_OPTS --n_jobs $N_GENE_JOBS --job_index $1 $COMMON $EM_OPTS $RNA_OPT $SR_OPT $HAF_OPT $CELL_OPT $LIGHT_STEP3_OPT $GTF_OPT"; }
 args_step4()        { local s=""; [[ "$PER_SAMPLE_45" == 1 ]] && s="--job_array_by_sample --job_index $1"
                       echo "--task step4 --scotch_target $SCOTCH_TARGET --output_folder \"$OUTPUT_DIR\" $s $CELL_OPT $COMMON"; }
 args_step5()        { local s=""; [[ "$PER_SAMPLE_45" == 1 ]] && s="--job_array_by_sample --job_index $1"

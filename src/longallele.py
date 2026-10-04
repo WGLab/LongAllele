@@ -314,6 +314,10 @@ parser.add_argument('--actv_min_phasable_frac', type=float, default=0.6,
 parser.add_argument('--actv_min_actv', type=float, default=0.3,
                     help='ACTV effect-size flag: actv >= this; flag column pass_min_actv, '
                          'rows are not dropped')
+parser.add_argument('--actv_min_snvs', type=int, default=2,
+                    help='minimum sample-level called heterozygous SNVs per gene for '
+                         'ACTV gene calls (0 disables); writes pass_min_snvs without '
+                         'dropping rows or changing permutation p-values')
 parser.add_argument('--snv_event_distance', type=int, default=50)
 parser.add_argument('--n_workers', type=int, default=1,
                     help='Number of parallel workers for step5 downstream analysis')
@@ -395,9 +399,10 @@ parser.add_argument('--gsi_base_pkl_path', type=str, default=None,
 
 
 parser.add_argument('--gtf_path', type=str, default=None,
-                    help='Reference annotation GTF for lightweight mode (light_prep/light_merge). '
-                         'Replaces the SCOTCH dependency: gene structures and read->gene '
-                         'assignment are derived from this GTF + the BAM directly.')
+                    help='Reference annotation GTF (e.g. GENCODE). step3: defines exon/intron for the '
+                         'SNV region labels and the exonic-only EM rerun (without it every SNV is '
+                         'labelled unknown and the rule is inactive). Lightweight mode '
+                         '(light_prep/light_merge) and isoquant_prep also derive gene structures from it.')
 
 
 parser.add_argument('--isoquant_dir', type=str, default=None,
@@ -502,6 +507,24 @@ parser.add_argument('--bulk', action='store_true',
                          'every read gets Cell="bulk" and Umi=<query_name> (unique, so no '
                          'spurious dedup). Matches SCOTCH --bulk semantics; per-cell counts '
                          'degrade to per-sample.')
+
+
+parser.add_argument('--sr_bam', type=str, nargs='+', default=None,
+                    help='step3: paired short-read BAM(s), one per --bam_path sample (or one '
+                         'for all). A candidate SNV the short reads cover >= --sr_min_depth '
+                         'times with <= --sr_max_alt non-reference bases is removed before '
+                         'the EM, after every other filter; sites the short reads did not '
+                         'see well enough are kept. Skipped under --snv_confidence_path.')
+parser.add_argument('--sr_min_depth', type=int, default=30,
+                    help='sr filter: short-read depth needed before a site can be judged')
+parser.add_argument('--sr_max_alt', type=int, default=1,
+                    help='sr filter: a judged site with at most this many non-reference '
+                         'short-read bases is removed')
+parser.add_argument('--sr_min_mapq', type=int, default=20,
+                    help='sr filter: short reads below this MAPQ are not counted (unique '
+                         'alignments only, for STAR as well as BWA/minimap2)')
+parser.add_argument('--sr_min_baseq', type=int, default=20,
+                    help='sr filter: short-read bases below this quality are not counted')
 parser.add_argument('--em_init', type=str, default='signed',
                     choices=['signed', 'concurrence'],
                     help="step3 EM haplotype initialization: 'signed' "
@@ -513,6 +536,13 @@ parser.add_argument('--no_phase_flip', dest='phase_flip', action='store_false',
                          '(three-cell adjudication: bridge>=2 reads, net '
                          'allele votes>=2, polished-likelihood improvement '
                          '- on by default)')
+parser.add_argument('--no_snv_region_rerun', dest='snv_region_rerun', action='store_false',
+                    help='step3: disable the SNV region rule\'s EM rerun. By default every '
+                         'candidate SNV is labelled exonic/intronic before the EM; a gene whose '
+                         'kept markers are all intronic although exonic candidates existed is '
+                         're-run on the exonic candidates alone. With this flag the gene is only '
+                         'labelled (snv_region_label=intron_snv_only); calls are never changed by '
+                         'the label either way (on by default)')
 parser.add_argument('--editing_exempt_affinity', type=float, default=2.0,
                     help='RNA-editing exemption (value IS the switch; >1 = off, '
                          'the default). A REDIportal-listed site is KEPT as an '
@@ -557,6 +587,12 @@ def _sample_names_of(args):
 
 def run_with_sample_modes(args, dispatch):
     n = len(args.scotch_target) if args.scotch_target else 1
+    sr_bams = getattr(args, 'sr_bam', None)
+    if (args.task == 'step3' and sr_bams is not None
+            and (not args.snv_confidence_path or resolve_genotype_stage(args)[0] == 'step1')
+            and len(sr_bams) not in (1, n)):
+        raise SystemExit(f'{len(sr_bams)} --sr_bam entries for {n} samples: '
+                         'give one shared BAM, or one per sample.')
     if args.task not in SAMPLE_TASKS or n <= 1:
 
 
@@ -650,6 +686,8 @@ def run_with_sample_modes(args, dispatch):
             args.scotch_target = [base['scotch_target'][i]]
             args.bam_path = ([base['bam_path'][i]]
                              if base['bam_path'] else None)
+            if sr_bams and len(sr_bams) == n:
+                args.sr_bam = [sr_bams[i]]
             if base['cell_type_df_path']:
                 if len(base['cell_type_df_path']) == n:
                     args.cell_type_df_path = [base['cell_type_df_path'][i]]
@@ -1104,6 +1142,27 @@ def main():
                 f'lists needs --job_array_by_sample: step3 otherwise processes all '
                 f'samples in one pass against a single list, which would apply one '
                 f'sample\'s genotype to another\'s reads. Run one job per sample.')
+        if args.sr_bam and snv_confidence is not None:
+            logger.info('[decided] sr_filter=OFF (given genotype sites)')
+        elif args.sr_bam:
+            logger.info(f'[decided] sr_filter=ON (user --sr_bam {args.sr_bam}; last pre-EM gate; remove when '
+                        f'short-read depth >= {args.sr_min_depth} and non-ref bases <= {args.sr_max_alt}; '
+                        f'reads MAPQ >= {args.sr_min_mapq}, bases Q >= {args.sr_min_baseq})')
+        else:
+            logger.info('[decided] sr_filter=OFF (no --sr_bam given)')
+        if not args.gtf_path:
+            logger.warning('⚠️ [decided] snv_region_rule=INACTIVE (no --gtf_path): every SNV is labelled '
+                           'unknown; no exonic-only EM rerun, no intron_snv_only label. Give the '
+                           'reference annotation GTF to enable it.')
+        else:
+            logger.info('[decided] snv_region_rerun=%s (exon/intron from the reference GTF %s, not the '
+                        'upstream gene structure; a gene whose kept markers are all intronic while '
+                        'exonic candidates existed %s; genes with no exonic candidate are labelled '
+                        'intron_snv_only)',
+                        'ON' if args.snv_region_rerun else 'OFF (user --no_snv_region_rerun)',
+                        args.gtf_path,
+                        'is re-run on the exonic candidates' if args.snv_region_rerun
+                        else 'is labelled intron_snv_only only')
         _hb = parse_het_beta(args.het_beta)
         _t1, _t3 = resolve_het_thresholds(args)
         _log_mapq_policy(logger)
@@ -1140,8 +1199,14 @@ def main():
             'seed': args.seed, 'max_iter': args.max_iter, 'tol': args.tol,
             'em_max_reads': int(args.em_max_reads or 0), 'h_m_init_from': args.h_m_init_from,
             'em_init': args.em_init, 'phase_flip': bool(args.phase_flip), 'gap_tau': args.gap_tau,
+            'snv_region_rerun': bool(args.snv_region_rerun),
+            'snv_region_gtf': os.path.basename(args.gtf_path) if args.gtf_path else None,
             'snv_classifier': os.path.basename(str(args.snv_classifier)) if args.snv_classifier else None,
             'clf_hard_threshold': args.clf_hard_threshold,
+            'sr_filter': u.short_read_filter_record(
+                args.sr_bam, args.sr_min_depth, args.sr_max_alt,
+                args.sr_min_mapq, args.sr_min_baseq,
+                pool=args.same_individual, enabled=snv_confidence is None),
             'high_artifact_mode': bool(args.high_artifact_mode),
             'alt_stretch_len': args.alt_stretch_len, 'var_cluster_window': args.var_cluster_window,
             'var_cluster_n': args.var_cluster_n,
@@ -1157,6 +1222,9 @@ def main():
         u.ensure_step3_config(args.output_folder, args.prefix, _step3_params,
                               logger=logger, cover_existing=args.cover_existing)
         ht = u.Haplotyping(scotch_target=args.scotch_target, bam_path=args.bam_path,
+                           sr_bam=args.sr_bam, sr_min_depth=args.sr_min_depth, sr_max_alt=args.sr_max_alt,
+                           sr_min_mapq=args.sr_min_mapq, sr_min_baseq=args.sr_min_baseq,
+                           sr_pool=args.same_individual,
                            het_beta=_hb, shrink_denominator=args.shrink_denominator,
                            heterozygous_coverage_factor=args.coverage_factor,
                            target=args.output_folder, ref_pickle_path=args.ref_pickle_path,
@@ -1195,7 +1263,9 @@ def main():
                            editing_exempt_affinity=args.editing_exempt_affinity,
                            editing_exempt_min_reads=args.editing_exempt_min_reads,
                            em_init_method=args.em_init,
-                           phase_flip=args.phase_flip)
+                           phase_flip=args.phase_flip,
+                           snv_region_rerun=args.snv_region_rerun,
+                           region_gtf=args.gtf_path)
         ht.generate_count_hap_genes()
         write_done_marker(args.output_folder, 'step3', args.job_index)
         logger.info(f'Finished haplotyping for job {args.job_index}')
@@ -1271,6 +1341,7 @@ def main():
                         f'min_phasable_reads={args.actv_min_phasable_reads}, '
                         f'min_phasable_frac={args.actv_min_phasable_frac}, '
                         f'min_actv={args.actv_min_actv}, '
+                        f'min_snvs={args.actv_min_snvs}, '
                         f'max_attempts={args.actv_max_attempts if args.actv_max_attempts is not None else 10 * args.actv_permutations}, '
                         f'seed={args.seed})')
             if not args.cell_type_df_path and args.actv_unit == 'cell':
@@ -1320,6 +1391,7 @@ def main():
             actv_max_attempts=args.actv_max_attempts,
             actv_min_phasable_frac=args.actv_min_phasable_frac,
             actv_min_actv=args.actv_min_actv,
+            actv_min_snvs=args.actv_min_snvs,
             actv_seed=args.seed if args.seed is not None else 42,
             actv_unit=args.actv_unit,
         )

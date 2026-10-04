@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 from enum import Enum
 
 
-SUPPORTED_ISOQUANT_VERSIONS = ('3.13.1',)
+SUPPORTED_ISOQUANT_VERSIONS = ('3.5.0', '3.13.1')
 
 
 ASSIGNMENT_TYPES_UNIQUE = frozenset({'unique', 'unique_minor_difference'})
@@ -372,6 +372,10 @@ def _check_version(version, force):
                      f'--force_version to run anyway; the header is still checked.')
 
 
+def _is_header_line(line):
+    return line.lstrip('#').split('\t', 1)[0].strip() == 'read_id'
+
+
 def _header_index(header, required, what):
     cols = header.rstrip('\n').lstrip('#').split('\t')
     missing = [c for c in required if c not in cols]
@@ -396,7 +400,7 @@ def parse_read_assignments(path, config, gene_map, transcript_map):
     with _open_text(path) as fh:
         header = None
         for line in fh:
-            if line.startswith('#'):
+            if line.startswith('#') and not _is_header_line(line):
                 continue
             if header is None:
                 header = _header_index(line, REQUIRED_ASSIGNMENT_COLUMNS, 'read_assignments')
@@ -458,7 +462,7 @@ def parse_transcript_model_reads(path, novel_model_genes, reference_norm_ids,
     with _open_text(path) as fh:
         header = None
         for line in fh:
-            if line.startswith('#'):
+            if line.startswith('#') and not _is_header_line(line):
                 continue
             if header is None:
                 header = _header_index(line, REQUIRED_MODEL_READS_COLUMNS, 'transcript_model_reads')

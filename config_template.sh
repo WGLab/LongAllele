@@ -1,65 +1,42 @@
-# LongAllele pipeline configuration
-# Usage: bash longallele.sh config_template.sh
-# Copy this file, fill in your paths and settings, then run.
-#
-# Every setting below is forwarded to src/longallele.py by longallele.sh. For a
-# parameter that has no line here, use EXTRA_OPTS at the bottom — it is passed
-# verbatim to every step (an explicit flag always wins over the preset).
+# LongAllele configuration
+# Copy: cp config_template.sh my_run.sh
+# Edit the paths and settings below, then run: bash longallele.sh my_run.sh
+# Guide: docs/pipeline_steps.md#configuration-options
 
-# ──── Required ────────────────────────────────────────────────────────────────
-# SCOTCH_TARGET, BAM_PATH and CELL_TYPE_DF may hold several space-separated
-# paths for multi-sample analysis. Because the list is split by the shell, an
-# individual path in those three must not contain spaces or wildcards. The
-# single-valued settings (REF_FASTA, OUTPUT_DIR, PREFIX, RNA_EDITING_DB) are
-# quoted for you and may contain spaces.
-INPUT="scotch"                           # scotch   = SCOTCH_TARGET below is a SCOTCH output directory
-                                         # isoquant = build the upstream from an IsoQuant run first
-                                         #            (ISOQUANT_DIR / ISOQUANT_PREFIX / GTF below)
-                                         # light    = no isoform tool at all: build the upstream from
-                                         #            the BAM + GTF alone (variant calling + phasing +
-                                         #            ASE; no ASTU, no step 1.5 / step 5)
-                                         # with isoquant / light, SCOTCH_TARGET is ignored
-SCOTCH_TARGET="/path/to/scotch_output"   # SCOTCH output directory (INPUT=scotch)
-ISOQUANT_DIR=""                          # INPUT=isoquant: IsoQuant output directory
-ISOQUANT_PREFIX=""                       # INPUT=isoquant: the --prefix IsoQuant was run with
-GTF=""                                   # INPUT=isoquant / light: the reference annotation GTF
-BULK=false                               # INPUT=isoquant / light: true = bulk BAM without CB/UB tags
-BAM_PATH="/path/to/aligned.bam"          # aligned BAM file
-REF_FASTA="/path/to/genome.fa"           # reference genome FASTA
-OUTPUT_DIR="/path/to/results"            # pipeline output directory
+# ──── Input files ─────────────────────────────────────────────────────────────
+BAM_PATH="/path/to/aligned.bam"          # genome-aligned, indexed BAM
+REF_FASTA="/path/to/genome.fa"           # matching reference genome FASTA
+OUTPUT_DIR="/path/to/results"            # results directory
 
-# ──── How to run ──────────────────────────────────────────────────────────────
-RUNNER="slurm"   # slurm = submit the five steps as a dependency-chained job graph
-                 # local = run them in order on this machine, no scheduler needed
-CORES=8          # local only: how many processes run at once (gene shards for
-                 # steps 1–3, workers for step 5)
-N_GENE_JOBS=50   # gene shards for steps 1–3 (slurm: array size; local: shards,
-                 # CORES of them at a time)
+# Choose one: scotch = SCOTCH results; isoquant = IsoQuant results;
+# light = BAM + FASTA + GTF for SNV calling, phasing and ASE.
+INPUT="scotch"
+SCOTCH_TARGET="/path/to/scotch_output"   # fill in for INPUT=scotch
+ISOQUANT_DIR=""                          # fill in for INPUT=isoquant
+ISOQUANT_PREFIX=""                       # your IsoQuant run prefix
+GTF=""                                   # reference annotation GTF (e.g. GENCODE); used by every input
+                                         # to label SNVs exonic/intronic; required for light or IsoQuant
 
-# ──── Samples ─────────────────────────────────────────────────────────────────
-N_SAMPLES=1              # number of BAM files; set >1 and use space-separated lists above
-SAME_INDIVIDUAL=false    # true  = the N BAMs belong to ONE person (e.g. several
-                         #         tissues of one donor): pooled into one variant
-                         #         call and one EM, each sample name becomes a
-                         #         cell type, and ACTV compares across them
-                         # false = N different samples, each processed on its own
-CELL_TYPE_DF=""          # single-cell: CSV with Cell/CellType columns (one
-                         # space-separated path per sample for multi-sample runs).
-                         # Giving it turns on ACTV across cell types in step 5;
-                         # with neither CELL_TYPE_DF nor SAME_INDIVIDUAL there are
-                         # no cell types to compare and no ACTV table is written.
-PREFIX=""                # output filename prefix (leave empty for none)
+# ──── Data type and platform ──────────────────────────────────────────────────
+BULK=false                               # false = single-cell/single-nucleus; true = bulk
+CELL_TYPE_DF=""                          # optional CSV with Cell and CellType columns
+PLATFORM="ont-cdna"                      # ont-cdna | ont-drna | hifi-isoseq | hifi-masseq | other
+                                         # other uses no SNV classifier
 
-# ──── Platform ────────────────────────────────────────────────────────────────
-# The preset carries the measured calling parameters AND the SNV classifier
-# trained for that library (README "Platform presets"). Do not hand-set those
-# parameters here.
-#   ont-cdna | ont-drna | hifi-isoseq | hifi-masseq
-#   other  = a library none of the shipped classifiers was trained for: the
-#            shared read-counting parameters, no classifier, clf-free marker
-#            priors (from read linkage)
-PLATFORM="ont-cdna"
-HIGH_ARTIFACT_MODE=false   # true enables the nascent-RNA leak filters for snRNA-seq
+# ──── Where to run ────────────────────────────────────────────────────────────
+RUNNER="slurm"   # local = this computer/server; slurm = submit to a SLURM cluster
+CORES=8          # local runs: tasks allowed at once; reduce if memory is limited
+N_GENE_JOBS=50   # total gene-processing jobs; normally leave at this default
+
+# ──── Optional sample settings ────────────────────────────────────────────────
+N_SAMPLES=1              # for light or IsoQuant input, run one sample at a time
+SAME_INDIVIDUAL=false    # true = compare multiple bulk samples from one individual
+PREFIX=""                # optional output filename label, e.g. sample1
+HIGH_ARTIFACT_MODE=false # extra filtering for single-nucleus RNA artifacts; unavailable with IsoQuant
+
+# With SCOTCH input, set N_SAMPLES > 1 to run multiple samples together.
+# Supply space-separated BAM_PATH, SCOTCH_TARGET and (if used) CELL_TYPE_DF
+# paths in matching sample order. These paths must not contain spaces.
 
 # ──── EM haplotyping (step 3) ─────────────────────────────────────────────────
 SEED=42                    # random seed
@@ -71,24 +48,34 @@ RNA_EDITING_DB=""          # override the bundled hg38 A-to-I database; leave em
                            # to use the bundled one, or set to "none" to disable
                            # the RNA-editing filter entirely
 
+# Optional short-read evidence: leave SR_BAM empty to disable.
+# Use indexed BAM(s) aligned to the same reference. For multiple samples, give
+# space-separated paths in BAM_PATH order (no spaces within paths), or one
+# shared BAM. SAME_INDIVIDUAL=true pools their evidence.
+SR_BAM=""
+SR_MIN_DEPTH=30            # remove a candidate only at this depth or higher
+SR_MAX_ALT=1               # and with at most this many non-reference bases
+SR_MIN_MAPQ=20             # minimum short-read mapping quality
+SR_MIN_BASEQ=20            # minimum short-read base quality
+
 # ──── Downstream analysis (step 5) ───────────────────────────────────────────
 EVENT_MODE="all_events"    # all_events | switching_events | fdr_events
 SNV_EVENT_DISTANCE=50      # ±bp exonic distance for SNV–event linking
-EVENT_MIN_READS=10         # minimum weighted reads per event test
+EVENT_MIN_READS=10         # distinct reads: isoform inclusion / raw-read include+skip
 ASTU_SIG_ONLY=false        # true restricts step 5 to ASTU-significant genes
 
-# ──── Anything else ───────────────────────────────────────────────────────────
-EXTRA_OPTS=""              # forwarded verbatim to every step, e.g.
-                           # "--gene_subset_path genes.txt --actv_permutations 1000"
+# ──── Additional command-line options ─────────────────────────────────────────
+EXTRA_OPTS=""              # normally leave empty; see docs/pipeline_steps.md
 
 # ──── SLURM resources (RUNNER=slurm only) ─────────────────────────────────────
-PARTITION="cpu"   # shared across all steps
+PARTITION="cpu"   # replace with a partition name on your cluster
 
-# Steps 1, 2, 1.5: lightweight per-gene / per-sample pileup
+# Memory, time limit (hours:minutes:seconds), and CPUs per job.
+# Steps 1, 2 and 1.5
 MEM_12="16G"  ; TIME_12="4:00:00"  ; CPUS_12=2
-# Step 3: EM haplotyping — more memory for large genes
+# Step 3: haplotyping
 MEM_3="32G"   ; TIME_3="8:00:00"   ; CPUS_3=4
-# Step 4: aggregation across all genes — single job, high memory
+# Step 4: summaries and counts
 MEM_4="64G"   ; TIME_4="4:00:00"   ; CPUS_4=8
-# Step 5: downstream analysis — parallel workers, high memory
+# Step 5: allelic analyses
 MEM_5="64G"   ; TIME_5="6:00:00"   ; CPUS_5=8

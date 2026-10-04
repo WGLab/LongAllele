@@ -78,6 +78,17 @@ def actv_gate_flags(gene_snv_df, axis):
     return ok.groupby(g['geneID']).any().to_dict()
 
 
+def actv_called_snv_count(gene_rows):
+    if 'gene_n_snvs_called' not in gene_rows:
+        return np.nan
+    values = pd.to_numeric(gene_rows['gene_n_snvs_called'], errors='coerce')
+    values = values.dropna().unique()
+    if len(values) != 1:
+        return np.nan
+    count = float(values[0])
+    return count if np.isfinite(count) and count >= 0 and count.is_integer() else np.nan
+
+
 def actv_gene_axis(matA, matB, label_of, axis, n_perm=300, min_cells=10,
                    seed=42, gene_id='', min_phasable_reads=20,
                    max_attempts=None, unit='cell', expressed_counts=None):
@@ -181,7 +192,9 @@ def _actv_label_of(path):
 def _actv_gene_task(gene_id, gene_name, sample, unit, inputs, gene_rows,
                     params, label_path):
     (n_perm, min_cells, seed, min_phasable_reads, max_attempts,
-     min_phasable_frac, min_actv) = params
+     min_phasable_frac, min_actv, min_snvs) = params
+    n_snvs_called = actv_called_snv_count(gene_rows)
+    pass_min_snvs = bool(min_snvs == 0 or (np.isfinite(n_snvs_called) and n_snvs_called >= min_snvs))
     mats = expressed_counts = unit_label_of = None
 
 
@@ -222,7 +235,9 @@ def _actv_gene_task(gene_id, gene_name, sample, unit, inputs, gene_rows,
                'n_permutations': n_perm,
                'n_reads_by_ct': json.dumps({c: v[0] for c, v in ct_reads.items()}, sort_keys=True),
                'min_phasable_frac': np.nan,
-               'pass_phasable_frac': False, 'pass_min_actv': False}
+               'pass_phasable_frac': False, 'pass_min_actv': False,
+               'gene_n_snvs_called': n_snvs_called, 'pass_min_snvs': pass_min_snvs,
+               'actv_gene_call': False}
         if sample is not None:
             res['Sample'] = sample
         if mats is not None:
@@ -259,6 +274,10 @@ def _actv_gene_task(gene_id, gene_name, sample, unit, inputs, gene_rows,
                     res['pass_phasable_frac'] = bool(min_phasable_frac <= 0 or (mf == mf and mf >= min_phasable_frac))
                     av = res.get('actv', np.nan)
                     res['pass_min_actv'] = bool(min_actv <= 0 or (av == av and av >= min_actv))
+        res['actv_gene_call'] = bool(
+            res['test_status'] == 'ok' and res['call']
+            and res['pass_phasable_frac'] and res['pass_min_actv']
+            and res['pass_min_snvs'] and res[f'{axis}_sig_ct'])
         rows.append(res)
     return rows
 
@@ -296,10 +315,34 @@ def load_pickle(file):
 _OBS_EXON_MIN_OVERLAP_BP = 20
 _OBS_EXON_MIN_OVERLAP_FRAC = 0.30
 _OBS_JUNCTION_TOLERANCE_BP = 20
-_OBS_JUNCTION_FLANK_MIN_BP = 20
 
 
-def _judge_event_obs(event_type, event, blocks, intron_spans):
+_OBS_JUNCTION_ANCHOR_WINDOW_BP = 20
+_OBS_JUNCTION_ANCHOR_MIN_BP = 10
+
+
+def _match_observed_junctions(intron_spans, events, cache):
+    included, ambiguous = set(), set()
+    tol = _OBS_JUNCTION_TOLERANCE_BP
+    for span in intron_spans:
+        span = tuple(span)
+        if span not in cache:
+            candidates = []
+            for start, end in events:
+                left, right = abs(span[0] - start), abs(span[1] - end)
+                if left <= tol and right <= tol:
+                    candidates.append((left + right, (start, end)))
+            best = min((dist for dist, _ in candidates), default=None)
+            cache[span] = {event for dist, event in candidates if dist == best}
+        matches = cache[span]
+        if len(matches) == 1:
+            included.update(matches)
+        elif matches:
+            ambiguous.update(matches)
+    return included, ambiguous
+
+
+def _judge_event_obs(event_type, event, blocks, intron_spans, junction_matches=None):
     if not blocks:
         return 'unobserved'
     ev_start, ev_end = int(event[0]), int(event[1])
@@ -325,20 +368,30 @@ def _judge_event_obs(event_type, event, blocks, intron_spans):
         return 'unobserved'
 
     if event_type == 'junction':
-        upstream_cov = 0
-        downstream_cov = 0
-        for bs, be in blocks:
-            upstream_cov += max(0,
-                                min(be, ev_start) - max(bs, ev_start - _OBS_JUNCTION_FLANK_MIN_BP))
-            downstream_cov += max(0,
-                                  min(be, ev_end + _OBS_JUNCTION_FLANK_MIN_BP) - max(bs, ev_end))
-        if upstream_cov < _OBS_JUNCTION_FLANK_MIN_BP or downstream_cov < _OBS_JUNCTION_FLANK_MIN_BP:
-            return 'unobserved'
-        for ins, ine in intron_spans:
-            if (abs(ins - ev_start) <= _OBS_JUNCTION_TOLERANCE_BP
-                    and abs(ine - ev_end) <= _OBS_JUNCTION_TOLERANCE_BP):
+
+
+        tol = _OBS_JUNCTION_TOLERANCE_BP
+        if junction_matches is not None:
+            included, ambiguous = junction_matches
+            if (ev_start, ev_end) in included:
                 return 'include'
-        return 'skip'
+            if (ev_start, ev_end) in ambiguous:
+                return 'unobserved'
+        else:
+            for ins, ine in intron_spans:
+                if abs(ins - ev_start) <= tol and abs(ine - ev_end) <= tol:
+                    return 'include'
+        win, need = _OBS_JUNCTION_ANCHOR_WINDOW_BP, _OBS_JUNCTION_ANCHOR_MIN_BP
+        left_cov = 0
+        right_cov = 0
+        for bs, be in blocks:
+            left_cov += max(0, min(be, ev_start) - max(bs, ev_start - win))
+            right_cov += max(0, min(be, ev_end + win) - max(bs, ev_end))
+        left_anchored = left_cov >= need and align_end > ev_start + tol
+        right_anchored = right_cov >= need and align_start < ev_end - tol
+        if left_anchored or right_anchored:
+            return 'skip'
+        return 'unobserved'
 
     return 'unobserved'
 
@@ -392,6 +445,11 @@ def _process_gene_events(gene_id, g, gsi, min_reads, gene_event_cache=None,
     total_B = float(hat_I_B_by_iso.sum())
 
 
+    read_isoform_counts = (g[['Read', 'Isoform']].drop_duplicates()
+                          .groupby('Read', sort=False)['Isoform']
+                          .agg(lambda values: tuple(sorted(values))).value_counts())
+
+
     read_obs_data = _gather_read_obs_data(g, variant_dir=variant_dir, gene_id=gene_id)
 
     rows = []
@@ -416,29 +474,47 @@ def _process_gene_events(gene_id, g, gsi, min_reads, gene_event_cache=None,
         hapA_abs = total_A - hapA_pres
         hapB_abs = total_B - hapB_pres
 
+        n_include_reads = np.zeros(n_ev, dtype=np.int64)
+        for isos, count in read_isoform_counts.items():
+            indices = set()
+            for iso in isos:
+                indices.update(iso_event_indices.get(iso, ()))
+            if indices:
+                n_include_reads[list(indices)] += int(count)
+
         obs_hapA_inc = obs_hapA_skip = obs_hapA_unobs = None
         obs_hapB_inc = obs_hapB_skip = obs_hapB_unobs = None
+        n_observed_reads = np.zeros(n_ev, dtype=np.int64)
         if read_obs_data is not None:
             obs_hapA_inc, obs_hapA_skip, obs_hapA_unobs, \
-                obs_hapB_inc, obs_hapB_skip, obs_hapB_unobs = _aggregate_obs_per_event(
-                    read_obs_data, event_type, events)
+                obs_hapB_inc, obs_hapB_skip, obs_hapB_unobs, n_observed_reads = _aggregate_obs_per_event(
+                    read_obs_data, event_type, events, return_read_counts=True)
 
         for e_idx, event in enumerate(events):
             table = np.array([
                 [hapA_pres[e_idx], hapA_abs[e_idx]],
                 [hapB_pres[e_idx], hapB_abs[e_idx]]
             ])
-            if table.sum() < min_reads or table.min() < 1:
+            isoform_eligible = n_include_reads[e_idx] >= min_reads
+            observed_eligible = (read_obs_data is not None
+                                 and n_observed_reads[e_idx] >= min_reads)
+
+
+            if not isoform_eligible and not observed_eligible:
                 continue
-            try:
-                chi2_stat, p_val, _, _ = chi2_contingency(table, correction=False)
-            except Exception:
-                continue
+            chi2_stat = p_val = np.nan
+            margins_ok = (table.sum(axis=0) > 0).all() and (table.sum(axis=1) > 0).all()
+            if isoform_eligible and margins_ok:
+                try:
+                    chi2_stat, p_val, _, _ = chi2_contingency(table, correction=False)
+                except ValueError:
+                    pass
 
             obs_extra = _obs_columns_for_event(
                 e_idx, obs_hapA_inc, obs_hapA_skip, obs_hapA_unobs,
                 obs_hapB_inc, obs_hapB_skip, obs_hapB_unobs,
                 min_reads=min_reads, read_obs_available=(read_obs_data is not None),
+                n_observed_reads=int(n_observed_reads[e_idx]),
             )
 
             row = {
@@ -448,6 +524,7 @@ def _process_gene_events(gene_id, g, gsi, min_reads, gene_event_cache=None,
                 'event_type': event_type,
                 'event_start': int(event[0]),
                 'event_end': int(event[1]),
+                'event_n_include_reads': int(n_include_reads[e_idx]),
                 'hapA_present': round(hapA_pres[e_idx], 2),
                 'hapA_absent': round(hapA_abs[e_idx], 2),
                 'hapB_present': round(hapB_pres[e_idx], 2),
@@ -518,7 +595,7 @@ def _gather_read_obs_data(g, variant_dir, gene_id):
     return out
 
 
-def _aggregate_obs_per_event(read_obs_data, event_type, events):
+def _aggregate_obs_per_event(read_obs_data, event_type, events, return_read_counts=False):
     n_ev = len(events)
     hapA_inc = np.zeros(n_ev, dtype=float)
     hapA_skip = np.zeros(n_ev, dtype=float)
@@ -526,33 +603,54 @@ def _aggregate_obs_per_event(read_obs_data, event_type, events):
     hapB_inc = np.zeros(n_ev, dtype=float)
     hapB_skip = np.zeros(n_ev, dtype=float)
     hapB_unobs = np.zeros(n_ev, dtype=float)
+    n_observed_reads = np.zeros(n_ev, dtype=np.int64)
+    junction_cache = {}
     for hat_I, hat_I_B, blocks, intron_spans in read_obs_data.values():
         if blocks is None:
             hapA_unobs += hat_I
             hapB_unobs += hat_I_B
             continue
+        junction_matches = (_match_observed_junctions(intron_spans, events, junction_cache)
+                            if event_type == 'junction' else None)
         for e_idx, event in enumerate(events):
-            status = _judge_event_obs(event_type, event, blocks, intron_spans)
+            status = _judge_event_obs(event_type, event, blocks, intron_spans,
+                                      junction_matches=junction_matches)
             if status == 'include':
+                n_observed_reads[e_idx] += 1
                 hapA_inc[e_idx] += hat_I
                 hapB_inc[e_idx] += hat_I_B
             elif status == 'skip':
+                n_observed_reads[e_idx] += 1
                 hapA_skip[e_idx] += hat_I
                 hapB_skip[e_idx] += hat_I_B
             else:
                 hapA_unobs[e_idx] += hat_I
                 hapB_unobs[e_idx] += hat_I_B
-    return hapA_inc, hapA_skip, hapA_unobs, hapB_inc, hapB_skip, hapB_unobs
+    weighted = (hapA_inc, hapA_skip, hapA_unobs, hapB_inc, hapB_skip, hapB_unobs)
+    return (*weighted, n_observed_reads) if return_read_counts else weighted
+
+
+def _adjust_event_pvalues(result):
+    for column in ('p_value', 'obs_p_value'):
+        result[column + '_adj'] = np.nan
+        for _, group in result.groupby('geneID', sort=False):
+            values = pd.to_numeric(group[column], errors='coerce')
+            valid = values.index[np.isfinite(values)]
+            if len(valid):
+                result.loc[valid, column + '_adj'] = multipletests(
+                    values.loc[valid].to_numpy(dtype=float), method='fdr_bh')[1]
+    return result
 
 
 def _obs_columns_for_event(e_idx, hapA_inc, hapA_skip, hapA_unobs,
                            hapB_inc, hapB_skip, hapB_unobs,
-                           min_reads, read_obs_available):
+                           min_reads, read_obs_available, n_observed_reads):
     if not read_obs_available:
         return {
             'obs_hapA_include': None, 'obs_hapA_skip': None, 'obs_hapA_unobserved': None,
             'obs_hapB_include': None, 'obs_hapB_skip': None, 'obs_hapB_unobserved': None,
             'obs_chi2': None, 'obs_p_value': None, 'obs_test_type': 'no_bam',
+            'obs_n_observed_reads': None,
         }
     a_inc = float(hapA_inc[e_idx]); a_skip = float(hapA_skip[e_idx]); a_unobs = float(hapA_unobs[e_idx])
     b_inc = float(hapB_inc[e_idx]); b_skip = float(hapB_skip[e_idx]); b_unobs = float(hapB_unobs[e_idx])
@@ -562,7 +660,7 @@ def _obs_columns_for_event(e_idx, hapA_inc, hapA_skip, hapA_unobs,
 
 
     margins_ok = not ((table.sum(axis=0) == 0).any() or (table.sum(axis=1) == 0).any())
-    if table.sum() >= min_reads and margins_ok:
+    if n_observed_reads >= min_reads and margins_ok:
         try:
             chi2_stat, p_v, _, _ = chi2_contingency(table, correction=False)
             chi2_val = round(float(chi2_stat), 4)
@@ -571,6 +669,7 @@ def _obs_columns_for_event(e_idx, hapA_inc, hapA_skip, hapA_unobs,
         except Exception:
             pass
     return {
+        'obs_n_observed_reads': n_observed_reads,
         'obs_hapA_include': round(a_inc, 2),
         'obs_hapA_skip': round(a_skip, 2),
         'obs_hapA_unobserved': round(a_unobs, 2),
@@ -661,7 +760,7 @@ class Downstream:
                 actv=False, actv_permutations=300, actv_min_cells=10,
                 actv_seed=42, actv_unit='cell', actv_min_phasable_reads=20,
                 actv_max_attempts=None, actv_min_phasable_frac=0.6,
-                actv_min_actv=0.3):
+                actv_min_actv=0.3, actv_min_snvs=2):
         if self.job_array_by_sample:
             if self.job_index < 0 or self.job_index >= len(self.sample_configs):
                 raise ValueError(
@@ -842,7 +941,7 @@ class Downstream:
                                min_phasable_reads=actv_min_phasable_reads,
                                max_attempts=actv_max_attempts,
                                min_phasable_frac=actv_min_phasable_frac,
-                               min_actv=actv_min_actv,
+                               min_actv=actv_min_actv, min_snvs=actv_min_snvs,
                                unit=actv_unit, read_hap_df=read_hap_df,
                                scotch_read_cell=scotch_read_cell,
                                scotch_isoform_df=scotch_isoform_df)
@@ -871,7 +970,7 @@ class Downstream:
     def _run_actv(self, gene_snv_df, n_perm=300, min_cells=10, seed=42,
                   unit='cell', read_hap_df=None, scotch_read_cell=None,
                   scotch_isoform_df=None, min_phasable_reads=20,
-                  max_attempts=None, min_phasable_frac=0.6, min_actv=0.3):
+                  max_attempts=None, min_phasable_frac=0.6, min_actv=0.3, min_snvs=2):
         if n_perm < 1:
             raise ValueError(f'--actv_permutations must be >= 1, got {n_perm}'
                              f' (0 would print pval=1 for everything and read '
@@ -888,6 +987,9 @@ class Downstream:
             raise ValueError(f'--actv_min_phasable_frac must be in [0, 1], got {min_phasable_frac}')
         if not (np.isfinite(float(min_actv)) and float(min_actv) >= 0):
             raise ValueError(f'--actv_min_actv must be a finite number >= 0, got {min_actv}')
+        if not (np.isfinite(float(min_snvs)) and float(min_snvs).is_integer()
+                and min_snvs >= 0):
+            raise ValueError('--actv_min_snvs must be a nonnegative integer')
         if unit not in ('cell', 'read'):
             raise ValueError(f"--actv_unit must be 'cell' or 'read', got "
                              f"{unit!r}")
@@ -926,7 +1028,7 @@ class Downstream:
 
         n_workers = int(getattr(self, 'n_workers', 1))
         params = (n_perm, min_cells, seed, min_phasable_reads, max_attempts,
-                  float(min_phasable_frac), float(min_actv))
+                  float(min_phasable_frac), float(min_actv), int(min_snvs))
         rows_by_gene = {g: sub for g, sub in gene_snv_df.groupby('geneID', sort=False)}
         label_path = None
         n_missing = [0]
@@ -992,7 +1094,8 @@ class Downstream:
                 'n_valid_permutations', 'n_permutation_attempts',
                 'n_invalid_permutations', 'n_phasable_reads_by_ct',
                 'n_expressing_cells_by_ct', 'n_reads_by_ct',
-                'min_phasable_frac', 'pass_phasable_frac', 'pass_min_actv']
+                'min_phasable_frac', 'pass_phasable_frac', 'pass_min_actv',
+                'gene_n_snvs_called', 'pass_min_snvs', 'actv_gene_call']
         out = pd.DataFrame(rows) if rows else pd.DataFrame(columns=cols)
 
 
@@ -1011,7 +1114,7 @@ class Downstream:
                             ignore_index=True)
 
 
-            for c in ('pass_phasable_frac', 'pass_min_actv'):
+            for c in ('pass_phasable_frac', 'pass_min_actv', 'pass_min_snvs', 'actv_gene_call'):
                 out[c] = out[c].map(lambda v: bool(v) if v == v and v is not None else False)
             if 'min_phasable_frac' in out:
                 out['min_phasable_frac'] = pd.to_numeric(out['min_phasable_frac'], errors='coerce')
@@ -1020,7 +1123,7 @@ class Downstream:
                   f'(unit={unit}, '
                   f'{int(out.eligible_cells.sum())} eligible axis-genes, '
                   f'B={n_perm}, min_cells={min_cells}, min_phasable_reads={min_phasable_reads}, '
-                  f'min_phasable_frac={min_phasable_frac}, min_actv={min_actv}; '
+                  f'min_phasable_frac={min_phasable_frac}, min_actv={min_actv}, min_snvs={min_snvs}; '
                   f'pass_phasable_frac {int(out.pass_phasable_frac.map(lambda v: v is True or v == True).sum())}, '
                   f'pass_min_actv {int(out.pass_min_actv.map(lambda v: v is True or v == True).sum())} of '
                   f'{int(out.eligible_cells.astype(bool).sum())} eligible — flags, not filters)')
@@ -1332,6 +1435,11 @@ class Downstream:
             'p_value_isoform', 'p_value_isoform_high', 'p_value_isoform_low',
             'p_value_isoform_adj', 'p_value_isoform_adj_high', 'p_value_isoform_adj_low'
         ]
+
+
+        if 'snv_region_label' not in ct_summary.columns:
+            ct_summary['snv_region_label'] = 'unknown'
+        needed_cols.append('snv_region_label')
         for col in needed_cols:
             if col not in ct_summary.columns:
                 if col == 'n_phase_blocks':
@@ -1357,6 +1465,9 @@ class Downstream:
         ct_rows['gene_alpha_hat_block_low'] = pd.to_numeric(ct_rows['alpha_hat_block_low'], errors='coerce')
         ct_rows['gene_alpha_hat_block_high'] = pd.to_numeric(ct_rows['alpha_hat_block_high'], errors='coerce')
         ct_rows['gene_n_phase_blocks'] = pd.to_numeric(ct_rows['n_phase_blocks'], errors='coerce')
+
+
+        ct_rows['gene_snv_region_label'] = ct_rows['snv_region_label'].fillna('unknown').astype(str)
         ct_rows['gene_alpha_hat_major'] = 1 - ct_rows['gene_alpha_hat']
         ct_rows['gene_alpha_hat_major_low'] = 1 - ct_rows['gene_alpha_hat_high']
         ct_rows['gene_alpha_hat_major_high'] = 1 - ct_rows['gene_alpha_hat_low']
@@ -1469,7 +1580,7 @@ class Downstream:
             'gene_alpha_hat', 'gene_alpha_hat_low', 'gene_alpha_hat_high',
             'gene_alpha_hat_block_low', 'gene_alpha_hat_block_high',
             'gene_alpha_hat_major', 'gene_alpha_hat_major_low', 'gene_alpha_hat_major_high',
-            'gene_major_hap', 'gene_minor_hap', 'gene_n_phase_blocks',
+            'gene_major_hap', 'gene_minor_hap', 'gene_n_phase_blocks', 'gene_snv_region_label',
             'gene_p_value', 'gene_p_value_adj',
             'ASE_call', 'ASTU_call',
             'overall_dominant_isoform',
@@ -1485,6 +1596,9 @@ class Downstream:
             'overall_dominant_pref_hap'
         ]
         result = snv_df.merge(ct_rows[gene_effect_cols], on='geneID', how='left')
+
+
+        result['gene_snv_region_label'] = result['gene_snv_region_label'].fillna('unknown').astype(str)
 
 
         result['snv_hap'] = np.where(result['h_A'] > 0.5, 'A', 'B')
@@ -1994,7 +2108,7 @@ class Downstream:
             'gene_alpha_hat', 'gene_alpha_hat_low', 'gene_alpha_hat_high',
             'gene_alpha_hat_block_low', 'gene_alpha_hat_block_high',
             'gene_alpha_hat_major', 'gene_alpha_hat_major_low', 'gene_alpha_hat_major_high',
-            'gene_major_hap', 'gene_minor_hap', 'gene_n_phase_blocks',
+            'gene_major_hap', 'gene_minor_hap', 'gene_n_phase_blocks', 'gene_snv_region_label',
             'gene_p_value', 'gene_p_value_adj',
             'ASE_call', 'ASTU_call',
             'overall_dominant_isoform',
@@ -2049,6 +2163,7 @@ class Downstream:
             'eventID',
             'event_type', 'event_start', 'event_end', 'event_length',
             'hapA_present', 'hapA_absent', 'hapB_present', 'hapB_absent',
+            'event_n_include_reads', 'obs_n_observed_reads',
             'obs_hapA_include', 'obs_hapA_skip', 'obs_hapA_unobserved',
             'obs_hapB_include', 'obs_hapB_skip', 'obs_hapB_unobserved',
             'obs_chi2', 'obs_p_value', 'obs_p_value_adj', 'obs_test_type',
@@ -2156,6 +2271,7 @@ class Downstream:
 
         event_df['event_pref_hap'] = pd.array([pd.NA] * len(event_df), dtype=pd.StringDtype())
         pref_mask = event_df['event_inclusion_frac_A'].notna() & event_df['event_inclusion_frac_B'].notna()
+        pref_mask &= event_df['event_inclusion_frac_A'] != event_df['event_inclusion_frac_B']
         event_df.loc[pref_mask, 'event_pref_hap'] = np.where(
             event_df.loc[pref_mask, 'event_inclusion_frac_A'] > event_df.loc[pref_mask, 'event_inclusion_frac_B'],
             'A', 'B'
@@ -2354,16 +2470,7 @@ class Downstream:
         result = pd.DataFrame(rows)
 
 
-        result['obs_p_value_adj'] = np.nan
-        for _, grp in result.groupby('geneID', sort=False):
-            result.loc[grp.index, 'p_value_adj'] = multipletests(
-                grp['p_value'], method='fdr_bh')[1]
-            obs_valid_idx = grp.index[grp['obs_p_value'].notna()]
-            if len(obs_valid_idx):
-                result.loc[obs_valid_idx, 'obs_p_value_adj'] = multipletests(
-                    result.loc[obs_valid_idx, 'obs_p_value'].to_numpy(dtype=float),
-                    method='fdr_bh',
-                )[1]
+        result = _adjust_event_pvalues(result)
 
         result = result.sort_values(['geneID', 'p_value_adj']).reset_index(drop=True)
         result = self._filter_haplotype_events(
@@ -2869,45 +2976,83 @@ class Downstream:
         if hap_event_df.empty:
             return pd.DataFrame()
 
+
+        snv_groups = {k: sub for k, sub in snv_df.groupby(['geneID', 'chrom'], sort=False)}
+        group_arrays = {}
+        gene_state = {}
         rows = []
-        for _, ev in hap_event_df.iterrows():
+        for ev in hap_event_df.to_dict('records'):
             gene_id = ev['geneID']
-            gene_event_cache = self._get_gene_event_cache(gene_id)
-            if gene_event_cache is None:
+            if gene_id not in gene_state:
+                gene_event_cache = self._get_gene_event_cache(gene_id)
+                gene_state[gene_id] = (None if gene_event_cache is None
+                                       else (gene_event_cache['exons_sorted'], {}))
+            state = gene_state[gene_id]
+            if state is None:
                 continue
-            exons_sorted = gene_event_cache['exons_sorted']
-
+            exons_sorted, ex_coord = state
+            gene_snvs = snv_groups.get((gene_id, ev['geneChr']))
+            if gene_snvs is None or len(gene_snvs) == 0:
+                continue
             ev_start, ev_end = int(ev['event_start']), int(ev['event_end'])
-            gene_snvs = snv_df[
-                (snv_df['geneID'] == gene_id) & (snv_df['chrom'] == ev['geneChr'])
-            ]
-
-            for _, snv in gene_snvs.iterrows():
-                snv_pos = int(snv['pos'])
-                exonic_dist = self._exonic_distance(snv_pos, ev_start, ev_end, exons_sorted)
-                if exonic_dist <= max_exonic_dist:
-                    rows.append({
-                        'geneID': gene_id,
-                        'geneName': ev['geneName'],
-                        'chrom': ev['geneChr'],
-                        'snv_pos': snv_pos,
-                        'snv_ref': snv['ref'],
-                        'snv_alt': snv.get('alt', np.nan),
-                        'h_A': snv['h_A'],
-                        'h_m': snv['h_m'],
-                        'hat_Z_prob_revised': snv.get('hat_Z_prob_revised', np.nan),
-                        'snv_hap': 'A' if snv['h_A'] > 0.5 else 'B',
-                        'event_type': ev['event_type'],
-                        'event_start': ev_start,
-                        'event_end': ev_end,
-                        'exonic_distance': exonic_dist,
-                        'genomic_distance': min(abs(snv_pos - ev_start), abs(snv_pos - ev_end)),
-                        'event_chi2': ev['chi2'],
-                        'event_p_value': ev['p_value'],
-                        'event_p_value_adj': ev['p_value_adj'],
-                    })
+            key = (gene_id, ev['geneChr'])
+            if key not in group_arrays:
+                _pos = gene_snvs['pos'].to_numpy().astype(np.int64)
+                _ex = np.fromiter((self._exonic_coordinate(int(p), exons_sorted, ex_coord) for p in _pos),
+                                  dtype=np.int64, count=len(_pos))
+                group_arrays[key] = (_pos, _ex, gene_snvs.to_dict('records'))
+            snv_pos, snv_ex, recs_all = group_arrays[key]
+            ex_s = self._exonic_coordinate(ev_start, exons_sorted, ex_coord)
+            ex_e = self._exonic_coordinate(ev_end, exons_sorted, ex_coord)
+            inside = (snv_pos >= ev_start) & (snv_pos <= ev_end)
+            dist = np.where(inside, 0, np.minimum(np.abs(snv_ex - ex_s), np.abs(snv_ex - ex_e)))
+            hit_idx = np.flatnonzero(dist <= max_exonic_dist)
+            if len(hit_idx) == 0:
+                continue
+            for i in hit_idx:
+                snv = recs_all[i]
+                pos_i = int(snv_pos[i])
+                rows.append({
+                    'geneID': gene_id,
+                    'geneName': ev['geneName'],
+                    'chrom': ev['geneChr'],
+                    'snv_pos': pos_i,
+                    'snv_ref': snv['ref'],
+                    'snv_alt': snv.get('alt', np.nan),
+                    'h_A': snv['h_A'],
+                    'h_m': snv['h_m'],
+                    'hat_Z_prob_revised': snv.get('hat_Z_prob_revised', np.nan),
+                    'snv_hap': 'A' if snv['h_A'] > 0.5 else 'B',
+                    'event_type': ev['event_type'],
+                    'event_start': ev_start,
+                    'event_end': ev_end,
+                    'exonic_distance': int(dist[i]),
+                    'genomic_distance': min(abs(pos_i - ev_start), abs(pos_i - ev_end)),
+                    'event_chi2': ev['chi2'],
+                    'event_p_value': ev['p_value'],
+                    'event_p_value_adj': ev['p_value_adj'],
+                })
 
         return pd.DataFrame(rows).reset_index(drop=True) if rows else pd.DataFrame()
+
+    @staticmethod
+    def _exonic_coordinate(pos, exons_sorted, cache):
+        v = cache.get(pos)
+        if v is None:
+            cum = 0
+            v = None
+            for es, ee in exons_sorted:
+                if pos < es:
+                    v = cum
+                    break
+                if pos <= ee:
+                    v = cum + (pos - es)
+                    break
+                cum += (ee - es)
+            if v is None:
+                v = cum
+            cache[pos] = v
+        return v
 
     @staticmethod
     def _exonic_distance(snv_pos, event_start, event_end, exons_sorted):

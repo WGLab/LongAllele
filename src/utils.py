@@ -47,6 +47,140 @@ def load_pickle(file):
 _READNAME_SUFFIX_RE = re.compile(r'_\d+$')
 
 
+def short_read_site_evidence(bam, df_sites, min_mapq=20, min_baseq=20):
+    n = len(df_sites)
+    depth = np.full(n, -1, dtype=np.int64)
+    alt = np.full(n, -1, dtype=np.int64)
+    if n == 0:
+        return depth, alt
+    chrom = str(df_sites['chrom'].iloc[0])
+    if chrom not in bam.references:
+        return depth, alt
+    pos = df_sites['pos'].to_numpy(dtype=np.int64)
+    start, end = int(pos.min()), int(pos.max()) + 1
+    def _keep(r):
+        return (r.mapping_quality >= min_mapq and not (r.is_secondary or r.is_supplementary
+                or r.is_duplicate or r.is_qcfail or r.is_unmapped))
+    cov = np.array(bam.count_coverage(chrom, start, end, quality_threshold=min_baseq,
+                                      read_callback=_keep), dtype=np.int64)
+    base_idx = {'A': 0, 'C': 1, 'G': 2, 'T': 3}
+    refs = df_sites['ref'].astype(str).str.upper().to_numpy()
+    for i, (p0, rb) in enumerate(zip(pos, refs)):
+        k = base_idx.get(rb)
+        if k is None:
+            continue
+        col = cov[:, p0 - start]
+        depth[i] = int(col.sum())
+        alt[i] = int(depth[i] - col[k])
+    return depth, alt
+
+
+_GTF_EXON_INDEX_CACHE = {}
+
+
+def gtf_exon_index(gtf_path):
+    key = os.path.abspath(gtf_path)
+    if key in _GTF_EXON_INDEX_CACHE:
+        return _GTF_EXON_INDEX_CACHE[key]
+    import gzip
+    gid_re = re.compile(r'gene_id "([^"]+)"')
+    raw = {}
+    opener = gzip.open if str(gtf_path).endswith('.gz') else open
+    with opener(gtf_path, 'rt') as fh:
+        for line in fh:
+            if line[:1] == '#':
+                continue
+            f = line.split('\t', 9)
+            if len(f) < 9 or f[2] != 'exon':
+                continue
+            m = gid_re.search(f[8])
+            if not m:
+                continue
+            raw.setdefault(m.group(1).split('.')[0], []).append((int(f[3]) - 1, int(f[4])))
+    index = {}
+    for gid, ivs in raw.items():
+        ivs.sort()
+        merged = [list(ivs[0])]
+        for s0, e0 in ivs[1:]:
+            if s0 <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], e0)
+            else:
+                merged.append([s0, e0])
+        index[gid] = [(a, b) for a, b in merged]
+    _GTF_EXON_INDEX_CACHE[key] = index
+    return index
+
+
+def marker_confidence(h_m, h_A):
+    h_m = np.asarray(h_m, dtype=float)
+    h_A = np.clip(np.asarray(h_A, dtype=float), 0.0, 1.0)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ent = -(h_A * np.log2(h_A) + (1 - h_A) * np.log2(1 - h_A))
+    ent = np.where((h_A <= 0) | (h_A >= 1), 0.0, ent)
+    return np.round(h_m * (1 - ent), 2)
+
+
+def snv_region_labels(positions, intervals):
+    pos = np.asarray(positions, dtype=np.int64)
+    if intervals is None:
+        return np.array(['unknown'] * len(pos), dtype=object)
+    out = np.array(['intronic'] * len(pos), dtype=object)
+    for s0, e0 in intervals:
+        out[(pos >= s0) & (pos < e0)] = 'exonic'
+    return out
+
+
+def apply_snv_region_rule(df_pileup_filtered, df_r, df_pi, results, h_m_init, clf_prob,
+                          run_fn, rerun_enabled=True, logger=None, gene_id=''):
+    reg = df_pileup_filtered['snv_region'].to_numpy()
+    is_in = reg == 'intronic'
+    known = bool(len(reg)) and not (reg == 'unknown').all()
+    n_cand_ex, n_cand_in = int((~is_in).sum()), int(is_in.sum())
+    mark = marker_confidence(results['h_m'], results['h_A']) >= 0.5
+    if len(mark) != len(reg):
+        raise ValueError(f'{gene_id}: results carry {len(mark)} markers for {len(reg)} candidates')
+    n_mk_ex, n_mk_in = int((mark & ~is_in).sum()), int((mark & is_in).sum())
+    out = dict(df_pileup_filtered=df_pileup_filtered, df_r=df_r, df_pi=df_pi, results=results,
+               h_m_init=h_m_init, clf_prob=clf_prob, em_rerun=0,
+               n_cand_ex=n_cand_ex, n_cand_in=n_cand_in, n_mk_ex=n_mk_ex, n_mk_in=n_mk_in)
+    if not known:
+        label = 'unknown'
+    elif n_mk_ex == 0 and n_mk_in == 0:
+        label = 'no_marker'
+    elif n_cand_ex == 0:
+        label = 'intron_snv_only'
+    elif n_mk_ex == 0 and not rerun_enabled:
+        label = 'intron_snv_only'
+    elif n_mk_ex == 0:
+        keep = ~is_in
+        df_r2, df_pi2 = df_r.loc[:, keep], df_pi.loc[:, keep]
+        hinit2 = (np.asarray(h_m_init)[keep]
+                  if isinstance(h_m_init, np.ndarray) and len(h_m_init) == len(keep) else h_m_init)
+        res2 = run_fn(df_r2, df_pi2, hinit2, df_pileup_filtered['pos'].to_numpy()[keep])
+        mark2 = (marker_confidence(res2['h_m'], res2['h_A']) >= 0.5
+                 if res2 is not None else np.zeros(0, dtype=bool))
+        _log_with_fallback(logger, f'[DIAG] {gene_id}: all-intronic rescue — masked {n_cand_in} '
+                                   f'intronic SNVs, re-ran EM with {n_cand_ex} exonic SNVs '
+                                   f'({int(mark2.sum())} kept)')
+        if mark2.any():
+            out.update(df_pileup_filtered=df_pileup_filtered[keep].reset_index(drop=True),
+                       df_r=df_r2, df_pi=df_pi2, results=res2, h_m_init=hinit2,
+                       clf_prob=(np.asarray(clf_prob, dtype=float)[keep]
+                                 if clf_prob is not None and len(clf_prob) == len(keep) else clf_prob),
+                       em_rerun=1, n_mk_ex=int(mark2.sum()), n_mk_in=0)
+            label = 'exonic_rerun'
+        else:
+            label = 'intron_snv_only'
+    else:
+        label = 'exonic'
+    out['label'] = label
+    _log_with_fallback(logger, f'[REGION] {gene_id}: candidates exonic/intronic '
+                               f'{n_cand_ex}/{n_cand_in} · markers exonic/intronic '
+                               f'{out["n_mk_ex"]}/{out["n_mk_in"]} → {label}'
+                               f'{" (EM rerun on exonic candidates)" if out["em_rerun"] else ""}')
+    return out
+
+
 def canonicalize_read_name(name):
     if not isinstance(name, str):
         return name
@@ -479,6 +613,36 @@ class BamInputError(FileNotFoundError):
 
 class KnobCInputError(BamInputError):
     pass
+
+
+class ShortReadInputError(BamInputError):
+    pass
+
+
+def short_read_filter_record(sr_bam, min_depth=30, max_alt=1, min_mapq=20,
+                             min_baseq=20, pool=False, enabled=True):
+    if not enabled or sr_bam is None:
+        return None
+    paths = [sr_bam] if isinstance(sr_bam, str) else list(sr_bam)
+    if not paths:
+        raise ValueError('--sr_bam given but empty')
+    if min_depth < 1 or min(max_alt, min_mapq, min_baseq) < 0:
+        raise ValueError('--sr_min_depth must be >= 1; --sr_max_alt / --sr_min_mapq / '
+                         '--sr_min_baseq must be >= 0')
+    inputs = []
+    for path in paths:
+        try:
+            with pysam.AlignmentFile(path, 'rb') as bam:
+                bam.check_index()
+            stat = os.stat(path)
+        except (OSError, ValueError) as exc:
+            raise ShortReadInputError(
+                f'--sr_bam {path}: cannot read indexed BAM; provide a readable, '
+                f'coordinate-sorted BAM with a valid index ({exc})') from exc
+        inputs.append(dict(path=os.path.realpath(path), size=stat.st_size,
+                           mtime_ns=stat.st_mtime_ns))
+    return dict(inputs=inputs, min_depth=min_depth, max_alt=max_alt,
+                min_mapq=min_mapq, min_baseq=min_baseq, pool=bool(pool))
 
 
 _CHROM_BAM_NAME_RE = re.compile(r'^chr(\d+|[XYM]|MT)$')
@@ -3101,9 +3265,23 @@ class Haplotyping:
                  em_init_method = 'signed', phase_flip = True,
                  max_baseq = None, alt_stretch_len = 5,
                  init_link_min_agreement = 0.0, init_link_min_shared = 3,
-                 h_m_init_from = 'clf'):
+                 h_m_init_from = 'clf',
+                 sr_bam = None, sr_min_depth = 30, sr_max_alt = 1,
+                 sr_min_mapq = 20, sr_min_baseq = 20, sr_pool = False,
+                 snv_region_rerun = True, region_gtf = None):
 
         self.logger = logger
+
+
+        self.sr_bam = (None if sr_bam is None or snv_confidence is not None else
+                       ([sr_bam] if isinstance(sr_bam, str) else list(sr_bam)))
+        self.sr_pool = bool(sr_pool)
+        short_read_filter_record(self.sr_bam, sr_min_depth, sr_max_alt,
+                                 sr_min_mapq, sr_min_baseq, self.sr_pool)
+        self.sr_min_depth, self.sr_max_alt = int(sr_min_depth), int(sr_max_alt)
+        self.sr_min_mapq, self.sr_min_baseq = int(sr_min_mapq), int(sr_min_baseq)
+        self._sr_handles, self._sr_lock = {}, threading.Lock()
+        self._sr_contig_warned = set()
         self._log_file = log_file_of(logger)
 
         self.min_alt_frac = validate_min_alt_frac(min_alt_frac)
@@ -3125,6 +3303,9 @@ class Haplotyping:
                              f"'concurrence', got {em_init_method!r}")
         self.em_init_method = em_init_method
         self.phase_flip = phase_flip
+        self.snv_region_rerun = bool(snv_region_rerun)
+        self.region_gtf = region_gtf
+        self._region_exon_index = None
         self.mapping_df_dict_list = None
         self._hap_gene_index = None
         self._hap_gene_cols = None
@@ -3889,6 +4070,7 @@ class Haplotyping:
         state = self.__dict__.copy()
         state['_fasta_lock'] = None
         state['fasta_handle'] = None
+        state['_sr_handles'], state['_sr_lock'] = {}, None
 
 
         state['_gsi_stripped'] = self._rebuildable('gsi')
@@ -3903,6 +4085,8 @@ class Haplotyping:
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._fasta_lock = threading.Lock()
+        self._sr_lock = threading.Lock()
+        self._sr_handles = {}
         self.fasta_handle = (pysam.FastaFile(self.ref_fasta_path)
                              if getattr(self, 'ref_fasta_path', None)
                              else None)
@@ -4560,6 +4744,64 @@ class Haplotyping:
                        .astype(str).to_numpy()))
         return len(want), len(want & have), len(want - have), scope
 
+    def _sr_handle(self, sample_index):
+        idx = 0 if (sample_index is None or len(self.sr_bam) == 1) else int(sample_index)
+        path = self.sr_bam[idx]
+        h = self._sr_handles.get(path)
+        if h is None:
+            try:
+                h = pysam.AlignmentFile(path, 'rb')
+                try:
+                    h.check_index()
+                except (OSError, ValueError):
+                    h.close()
+                    raise
+                self._sr_handles[path] = h
+            except (OSError, ValueError) as exc:
+                raise ShortReadInputError(f'--sr_bam {path}: {exc}') from exc
+        return h
+
+    def short_read_filter(self, df_sites, geneID, sample_index=None):
+        indices = (range(len(self.sr_bam)) if self.sr_pool else [sample_index])
+        depth, alt = np.zeros(len(df_sites), dtype=np.int64), np.zeros(len(df_sites), dtype=np.int64)
+        observed = np.zeros(len(df_sites), dtype=bool)
+        chrom = str(df_sites['chrom'].iloc[0]) if len(df_sites) else None
+        with self._sr_lock:
+            seen_paths = set()
+            for idx in indices:
+                path = self.sr_bam[0 if idx is None or len(self.sr_bam) == 1 else idx]
+                real_path = os.path.realpath(path)
+                if real_path in seen_paths:
+                    continue
+                seen_paths.add(real_path)
+                bam = self._sr_handle(idx)
+                try:
+                    d, a = short_read_site_evidence(bam, df_sites, self.sr_min_mapq, self.sr_min_baseq)
+                except (OSError, ValueError) as exc:
+                    raise ShortReadInputError(f'--sr_bam {path}: {exc}') from exc
+                valid = d >= 0
+                depth[valid] += d[valid]
+                alt[valid] += a[valid]
+                observed |= valid
+                key = (path, chrom)
+                if chrom is not None and chrom not in bam.references and key not in self._sr_contig_warned:
+                    self._sr_contig_warned.add(key)
+                    _log_with_fallback(self.logger, f'[WARN][SR_CONTIG_MISSING] sr filter: contig {chrom!r} is not in '
+                                      f'{path}; this BAM contributes no evidence for its sites')
+        depth[~observed] = -1
+        alt[~observed] = -1
+        evaluated = depth >= self.sr_min_depth
+        remove = evaluated & (alt <= self.sr_max_alt)
+        n_undet = int((~evaluated).sum())
+        return ~remove, int(evaluated.sum()), int(remove.sum()), n_undet
+
+    def region_exon_intervals(self, geneID):
+        if not self.region_gtf:
+            return None
+        if self._region_exon_index is None:
+            self._region_exon_index = gtf_exon_index(self.region_gtf)
+        return self._region_exon_index.get(str(geneID).split('.')[0])
+
     def run_em_gene(self, geneID, sample_index = None):
         em_input = self.em_input if self.n_samples==1 else os.path.join(self.em_input, self.sample_names[sample_index])
         pileup_path = os.path.join(em_input, f'{geneID}_pileup.csv')
@@ -4679,6 +4921,10 @@ class Haplotyping:
                 (df_pileup.alt_count > self.n_alt) & (df_pileup.depth >= self.depth)
                 & _af_ok3].reset_index(drop=True)
         _n_before = len(df_pileup); _n_after_depth = len(df_pileup_filtered)
+
+
+        df_pileup_filtered['snv_region'] = snv_region_labels(
+            df_pileup_filtered['pos'].to_numpy(), self.region_exon_intervals(geneID))
         if len(df_pileup_filtered)==0:
             _depth_max = df_pileup['depth'].max() if len(df_pileup) > 0 else None
             _alt_max = df_pileup['alt_count'].max() if len(df_pileup) > 0 else None
@@ -4903,6 +5149,25 @@ class Haplotyping:
                 mes = f'[WARN] {geneID}: site_reads.pkl not available, classifier skipped'
                 print(mes) if self.logger is None else self.logger.warning(mes)
 
+
+        if self.sr_bam is not None and self.snv_confidence is None and len(df_pileup_filtered) > 0:
+            _sr_keep, _sr_eval, _sr_removed, _sr_undet = self.short_read_filter(
+                df_pileup_filtered, geneID, sample_index)
+            _log_with_fallback(self.logger, f'[DIAG] {geneID}: sr filter — evaluated {_sr_eval} · '
+                                            f'removed {_sr_removed} · undetermined (sr depth < '
+                                            f'{self.sr_min_depth}) {_sr_undet}')
+            if _sr_removed > 0:
+                df_pileup_filtered = df_pileup_filtered[_sr_keep].reset_index(drop=True)
+                if _clf_prob_surviving is not None:
+                    _clf_prob_surviving = np.asarray(_clf_prob_surviving, dtype=float)[_sr_keep]
+                if len(df_pileup_filtered) == 0:
+                    return None, None, None, None, None, None, None, None
+                snv_list = df_pileup_filtered["ID"].tolist()
+                df_r = df_read_snv.loc[:, snv_list]
+                df_pi = df_read_pi.loc[:, snv_list]
+                n_reads, n_snvs = df_r.shape
+                gamma = float((df_r.to_numpy() == EM_MISSING_CODE).sum()) / (n_reads * n_snvs)
+
         h_m_init = None
         if self.snv_confidence is not None:
 
@@ -4967,6 +5232,8 @@ class Haplotyping:
                 n_reads, n_snvs = df_r.shape
                 gamma = float((df_r.to_numpy() == EM_MISSING_CODE).sum()) / (n_reads * n_snvs)
                 h_m_init = h_m_arr
+                if _clf_prob_surviving is not None:
+                    _clf_prob_surviving = np.asarray(_clf_prob_surviving, dtype=float)[keep_indices]
                 mes = f'[DIAG] {geneID}: iterative pruning removed {_n_pruned} low-scoring SNVs, {len(h_m_arr)} remain'
                 _log_with_fallback(self.logger, mes)
         em_snv_filter = bool(self.em_snv_filter and self.snv_confidence is None)
@@ -4991,17 +5258,41 @@ class Haplotyping:
             return None, None, None, None, None, None, None, None
 
 
-        _marker_positions = df_pileup_filtered['pos'].to_numpy()
+        def _em_and_flip(_r, _p, _hinit, _positions):
+            _res = run_em_capped(_r, _p, cap=int(self.em_max_reads or 0),
+                                 gene_id=geneID, logger=self.logger,
+                                 **dict(em_kwargs, h_m_init=_hinit))
+            if _res is None or not self.phase_flip:
+                return _res
+            _res, _fi = guarded_switch_flip(_r, _p, _res, _positions)
+
+
+            if _fi.get('flip_applied'):
+                _log_with_fallback(self.logger, f'[FLIP] {geneID}: suffix flip applied at gap '
+                                                f'{_fi.get("flip_gap_pos")}, dll {_fi.get("flip_dll")}')
+            return _res
         if self.phase_flip:
             results, _flip_info = guarded_switch_flip(
-                df_r, df_pi, results, _marker_positions)
-
-
+                df_r, df_pi, results, df_pileup_filtered['pos'].to_numpy())
             if _flip_info.get('flip_applied'):
-                _fm = (f'[FLIP] {geneID}: suffix flip applied at gap '
-                       f'{_flip_info.get("flip_gap_pos")}, dll '
-                       f'{_flip_info.get("flip_dll")}')
-                _log_with_fallback(self.logger, _fm)
+                _log_with_fallback(self.logger, f'[FLIP] {geneID}: suffix flip applied at gap '
+                                                f'{_flip_info.get("flip_gap_pos")}, dll '
+                                                f'{_flip_info.get("flip_dll")}')
+
+
+        _rr = apply_snv_region_rule(df_pileup_filtered, df_r, df_pi, results, h_m_init,
+                                    _clf_prob_surviving, _em_and_flip,
+                                    rerun_enabled=self.snv_region_rerun,
+                                    logger=self.logger, gene_id=geneID)
+        (df_pileup_filtered, df_r, df_pi, results, h_m_init, _clf_prob_surviving) = (
+            _rr['df_pileup_filtered'], _rr['df_r'], _rr['df_pi'], _rr['results'],
+            _rr['h_m_init'], _rr['clf_prob'])
+        n_reads, n_snvs = df_r.shape
+        gamma = float((df_r.to_numpy() == EM_MISSING_CODE).sum()) / (n_reads * n_snvs)
+        _region_label, _em_rerun = _rr['label'], _rr['em_rerun']
+        _n_cand_ex, _n_cand_in = _rr['n_cand_ex'], _rr['n_cand_in']
+        _n_mk_ex, _n_mk_in = _rr['n_mk_ex'], _rr['n_mk_in']
+        _marker_positions = df_pileup_filtered['pos'].to_numpy()
 
 
         _marker_blocks = assign_phase_blocks(
@@ -5073,6 +5364,10 @@ class Haplotyping:
                        'n_phase_blocks': _n_phase_blocks,
                        'p_value_orient_min': lrt_test.get('p_value_orient_min'),
                        'n_orientations': lrt_test.get('n_orientations'),
+                       'snv_region_label': _region_label,
+                       'n_candidates_exonic': _n_cand_ex, 'n_candidates_intronic': _n_cand_in,
+                       'n_markers_exonic': _n_mk_ex, 'n_markers_intronic': _n_mk_in,
+                       'em_rerun_exonic': _em_rerun,
                        'CellType': 'Bulk'}
         count_matrix_hapA.columns = [geneName + '_' + col + '_hapA' for col in count_matrix_hapA.columns.tolist()]
         count_matrix_hapB.columns = [geneName + '_' + col + '_hapB' for col in count_matrix_hapB.columns.tolist()]
@@ -5108,6 +5403,10 @@ class Haplotyping:
                     'lrt_stat': None,
                     'p_value': None,
                     'n_phase_blocks': _n_phase_blocks,
+                    'snv_region_label': _region_label,
+                    'n_candidates_exonic': _n_cand_ex, 'n_candidates_intronic': _n_cand_in,
+                    'n_markers_exonic': _n_mk_ex, 'n_markers_intronic': _n_mk_in,
+                    'em_rerun_exonic': _em_rerun,
                     'CellType': celltype}
                 try:
                     df_r_ct = df_r.loc[celltype_mask]
@@ -5184,6 +5483,30 @@ class Haplotyping:
                               & (pos <= int(geneInfo['geneEnd']))).astype(int)
         return df
 
+    def _clear_gene_outputs(self, geneName, geneID):
+        stem = f'{geneName}_{geneID}'
+        iso_suffixes = ['isoform_agg', 'isoform_agg_balance', 'isoform_agg_unbalance',
+                        'isoform_agg_pmax', 'isoform_agg_extrap', 'astu_block_sums']
+        groups = [
+            (os.path.join(self.count_hap_folder_path, 'all_genes_separate'),
+             ['hapA', 'hapB', 'hapA_phasable', 'hapB_phasable']),
+            (os.path.join(self.count_hap_folder_path, 'all_genes_isoform_separate'), iso_suffixes),
+            (os.path.join(self.summary_statistics_path, 'all_genes_separate'), ['summary']),
+            (os.path.join(self.snv_hap_path, 'all_genes_separate'), ['read_hap']),
+        ]
+        ct_root = os.path.join(self.count_hap_folder_path, 'ct_isoform_separate')
+        if os.path.isdir(ct_root):
+            groups.extend((os.path.join(ct_root, ct), iso_suffixes)
+                          for ct in os.listdir(ct_root) if os.path.isdir(os.path.join(ct_root, ct)))
+        paths = [os.path.join(folder, f'{stem}_{suffix}.csv')
+                 for folder, suffixes in groups for suffix in suffixes]
+        paths.append(os.path.join(self.snv_hap_path, 'all_genes_separate_snv', f'{stem}.csv'))
+        for path in paths:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
     def generate_count_hap_gene(self, geneID, sample_index):
         geneName = self._get_gene_name(geneID)
 
@@ -5206,6 +5529,8 @@ class Haplotyping:
             try:
                 print(f"Running EM algorithm")
                 count_matrix_hapA, count_matrix_hapB, count_matrix_hapA_phasable, count_matrix_hapB_phasable, result_dict, snv_info_df, read_hap_df, ct_results_df = self.run_em_gene(geneID, sample_index)
+                if self.cover_existing:
+                    self._clear_gene_outputs(geneName, geneID)
                 if snv_info_df is not None:
                     count_matrix_hapA.to_csv(hapA_file_path)
                     count_matrix_hapB.to_csv(hapB_file_path)
@@ -5358,7 +5683,7 @@ class Haplotyping:
                 else:
                     _msg = f'Empty results for {geneID}'
                     print(_msg) if self.logger is None else self.logger.info(_msg)
-            except KnobCInputError:
+            except (KnobCInputError, ShortReadInputError):
 
 
                 raise
@@ -5384,10 +5709,11 @@ class Haplotyping:
 
             if ret == 'failed':
                 status = 'failed'
-        except KnobCInputError as exc:
+        except (KnobCInputError, ShortReadInputError) as exc:
 
 
-            _m = f'⛔ gene {geneID}: Knob C read-filter input unusable, stopping the run: {exc}'
+            _filter = 'short-read filter' if isinstance(exc, ShortReadInputError) else 'Knob C read-filter'
+            _m = f'⛔ gene {geneID}: {_filter} input unusable, stopping the run: {exc}'
             print(_m, flush=True) if self.logger is None else self.logger.error(_m)
             raise
         except Exception:
