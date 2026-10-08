@@ -13,20 +13,18 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 LA=../../src/longallele.py
-CLF=../../src/models/snv_classifier_ont_hg001_17feat.joblib
 SCOTCH=scotch_target
 BAM=demo.bam
 REF=ref/chr22.fa.gz
+GTF=ref/demo_genes.gtf.gz      # GENCODE annotation of the 10 demo genes (exon/intron SNV labels)
 CT=sample7_celltype.csv
 OUT=demo_output
 PREFIX=demo
 
 COMMON="--scotch_target $SCOTCH --bam_path $BAM --ref_fasta_path $REF \
         --output_folder $OUT --prefix $PREFIX --seed 42"
-# variant-calling / classifier / filter settings (match the paper run)
-CALL="--depth 20 --n_alt_count 10 --min_mapq 20 --min_baseq 5 --min_dist_to_end 3 \
-      --heterozygous_filter 0.99 --snv_classifier $CLF --clf_init \
-      --clf_hard_threshold 0.05 --gap_tau 1.0"
+# platform preset: calling parameters + the ONT cDNA classifier (docs/pipeline_steps.md)
+CALL="--platform ont-cdna"
 
 mkdir -p $OUT
 
@@ -41,13 +39,12 @@ echo "### step2  — build EM input matrices"
 python $LA --task step2 $COMMON $CALL
 
 echo "### step3  — EM haplotyping"
-python $LA --task step3 $COMMON $CALL --cell_type_df_path $CT
+python $LA --task step3 $COMMON $CALL --cell_type_df_path $CT --gtf_path $GTF
 
 echo "### step4  — summary statistics + count matrices"
-python $LA --task step4 $COMMON --cell_type_df_path $CT \
-        --summary_haplotype --summary_count --csv
+python $LA --task step4 $COMMON --cell_type_df_path $CT --csv
 
-echo "### step5  — downstream: ASE / ASTU effect sizes + haplotype-event tests"
+echo "### step5  — downstream: ASE / ASTU effect sizes + haplotype-event tests + ACTV"
 python $LA --task step5 $COMMON --cell_type_df_path $CT \
         --event_min_reads 10 --snv_event_distance 50 --event_mode all_events --n_workers 2
 

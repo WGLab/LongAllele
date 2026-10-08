@@ -17,6 +17,8 @@ bash run_demo.sh          # writes ./demo_output/
 ```
 
 Compare `demo_output/` against the shipped reference in `expected_output/`.
+The same run through the config-driven driver: `RUNNER=local` in a config
+pointing at these inputs, then `bash ../../longallele.sh my_demo.sh`.
 
 `expected_output/` was produced with the pinned versions in `requirements.txt`.
 Compare it numerically rather than byte for byte: step 3 runs the EM across all
@@ -48,24 +50,33 @@ within the same calls but move individual numbers considerably more.
 | `count_matrix_hap_demo/*` | step4: haplotype-resolved isoform count matrices |
 | `downstream_demo/gene_snv.csv` | step5: per-SNV ASE / ASTU effect sizes |
 | `downstream_demo/event_snv.csv` | step5: haplotype ↔ exon/junction event associations |
+| `downstream_demo/actv_results.csv` | step5: allelic cell-type variability (ACTV) per gene — on because a cell-type file is given |
 
-`expected_output/` ships the four headline CSVs
-(`summary_statistics.csv`, `snv_hap_map.csv`, `gene_snv.csv`, `event_snv.csv`)
-as a reference to diff against.
+`expected_output/` ships the five headline CSVs
+(`summary_statistics.csv`, `snv_hap_map.csv`, `gene_snv.csv`, `event_snv.csv`,
+`actv_results.csv`) as a reference to diff against. They were regenerated on
+2026-10-02 with `--platform ont-cdna` (the shipped preset: depth 10, 2 alt
+reads, the ONT cDNA classifier).
 
 ## Expected result
 
 Every output carries a `CellType` column (Bulk + B / Monocyte / NK / T cells).
-At the Bulk level the 10 genes span the full range of calls — some significant
-for allele-specific expression (ASE) and/or transcript usage (ASTU), some not:
+At the Bulk level the calls are (✓ = called, ~ = test significant but the
+interval does not support a call, – = not significant, n/a = no p-value):
 
 | Gene | ASE | ASTU |    | Gene | ASE | ASTU |
 |------|-----|------|----|------|-----|------|
-| SELENOM  | ✓ | ✓ | | TPST2  | – | – |
-| APOBEC3G | ✓ | ✓ | | NDUFA6 | – | – |
-| SFI1     | ✓ | ✓ | | TCF20  | – | – |
-| UBE2L3   | – | ✓ | | SAMM50 | – | – |
-| NCAPH2   | – | ✓ | | SNAP29 | – | – |
+| SELENOM  | ✓ | ✓ | | NDUFA6 | – | – |
+| APOBEC3G | ✓ | ✓ | | SAMM50 | – | – |
+| NCAPH2   | ~ | ~ | | SFI1   | n/a | n/a |
+| SNAP29   | ~ | – | | TCF20  | n/a | n/a |
+| UBE2L3   | n/a | n/a | | TPST2  | n/a | n/a |
+
+Four genes get no p-value: under the preset they call 24–57 SNVs that fall into
+8–17 phase blocks, and LongAllele reports NA for genes with more than 7 blocks
+rather than a p-value that was not checked under every block orientation (see
+`n_phase_blocks` in `summary_statistics.csv`). ACTV (`actv_results.csv`) flags
+NDUFA6 and APOBEC3G as having an ASE effect that differs between cell types.
 
 (Significance is FDR-adjusted within this 10-gene set, so p-values differ from a
 genome-wide run.)
