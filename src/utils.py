@@ -5115,7 +5115,6 @@ class Haplotyping:
         df_read_pi_filtered = df_read_pi.loc[:, snv_list]
         df_r, df_pi = df_read_snv_filtered, df_read_pi_filtered
         n_reads, n_snvs = df_r.shape
-        gamma = float((df_r.to_numpy() == EM_MISSING_CODE).sum()) / (n_reads * n_snvs)
 
         _clf_prob_surviving = None
         if self.snv_classifier_model is not None and self.snv_confidence is None and len(df_pileup_filtered) > 0:
@@ -5143,7 +5142,6 @@ class Haplotyping:
                         df_r = df_read_snv.loc[:, snv_list]
                         df_pi = df_read_pi.loc[:, snv_list]
                         n_reads, n_snvs = df_r.shape
-                        gamma = float((df_r.to_numpy() == EM_MISSING_CODE).sum()) / (n_reads * n_snvs)
                     _clf_prob_surviving = np.asarray(clf_prob, dtype=float)
             else:
                 mes = f'[WARN] {geneID}: site_reads.pkl not available, classifier skipped'
@@ -5166,7 +5164,6 @@ class Haplotyping:
                 df_r = df_read_snv.loc[:, snv_list]
                 df_pi = df_read_pi.loc[:, snv_list]
                 n_reads, n_snvs = df_r.shape
-                gamma = float((df_r.to_numpy() == EM_MISSING_CODE).sum()) / (n_reads * n_snvs)
 
         h_m_init = None
         if self.snv_confidence is not None:
@@ -5230,7 +5227,6 @@ class Haplotyping:
                 df_r = df_read_snv.loc[:, snv_list]
                 df_pi = df_read_pi.loc[:, snv_list]
                 n_reads, n_snvs = df_r.shape
-                gamma = float((df_r.to_numpy() == EM_MISSING_CODE).sum()) / (n_reads * n_snvs)
                 h_m_init = h_m_arr
                 if _clf_prob_surviving is not None:
                     _clf_prob_surviving = np.asarray(_clf_prob_surviving, dtype=float)[keep_indices]
@@ -5288,7 +5284,6 @@ class Haplotyping:
             _rr['df_pileup_filtered'], _rr['df_r'], _rr['df_pi'], _rr['results'],
             _rr['h_m_init'], _rr['clf_prob'])
         n_reads, n_snvs = df_r.shape
-        gamma = float((df_r.to_numpy() == EM_MISSING_CODE).sum()) / (n_reads * n_snvs)
         _region_label, _em_rerun = _rr['label'], _rr['em_rerun']
         _n_cand_ex, _n_cand_in = _rr['n_cand_ex'], _rr['n_cand_in']
         _n_mk_ex, _n_mk_in = _rr['n_mk_ex'], _rr['n_mk_in']
@@ -5352,7 +5347,9 @@ class Haplotyping:
 
         read_hap_df["read_block"] = (
             _read_blocks.astype(int) if len(_read_blocks) else 0)
-        result_dict = {'geneID': geneID, 'geneName': geneName, 'gamma': gamma,
+
+
+        result_dict = {'geneID': geneID, 'geneName': geneName,
                        'n_reads': n_reads, 'n_reads_phasable': read_hap_df.reads_phasable.sum(),
                        'n_snvs': n_snvs, 'alpha_hat': alpha_hat,
                        'alpha_hat_low': alpha_hat_low, 'alpha_hat_high': alpha_hat_high,
@@ -5388,7 +5385,6 @@ class Haplotyping:
                 row = {
                     'geneID': geneID,
                     'geneName': geneName,
-                    'gamma': gamma,
                     'n_reads': len(celltype_reads[celltype]),
                     'n_reads_phasable': len(celltype_phasable_reads[celltype]) if celltype in celltype_phasable_reads.keys() else 0,
                     'n_snvs': n_snvs,
