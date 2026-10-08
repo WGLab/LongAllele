@@ -89,10 +89,6 @@ Reads are pooled across cells for SNV calling, phasing and read-to-haplotype ass
 
 Code to reproduce the analyses and figures in the manuscript is available at [WGLab/LongAllele_Analysis](https://github.com/WGLab/LongAllele_Analysis/tree/main).
 
-<p align="center">
-  <img src="assets/figure1.png" alt="LongAllele overview" width="900">
-</p>
-
 ## Configuration
 
 Set your input paths and run settings in your copy of [config_template.sh](config_template.sh):
