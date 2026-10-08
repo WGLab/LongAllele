@@ -5,9 +5,11 @@ import time
 import re
 import zlib
 import pysam
+import warnings
 import numpy as np
 import pandas as pd
 from scipy.stats import chi2_contingency, binomtest
+from scipy.stats import chi2 as _chi2_dist
 from scipy.optimize import brentq
 from statsmodels.stats.multitest import multipletests
 from joblib import Parallel, delayed
@@ -434,7 +436,12 @@ def _process_gene_events(gene_id, g, gsi, min_reads, gene_event_cache=None,
         return []
 
 
-    iso_weights = g.groupby('Isoform', sort=False)[['hat_I', 'hat_I_B']].sum()
+    g_pool = g[g['Isoform'].isin(iso_exon_map.keys())]
+    if g_pool.empty:
+        return []
+
+
+    iso_weights = g_pool.groupby('Isoform', sort=False)[['hat_I', 'hat_I_B']].sum()
     if iso_weights.empty:
         return []
 
@@ -445,7 +452,7 @@ def _process_gene_events(gene_id, g, gsi, min_reads, gene_event_cache=None,
     total_B = float(hat_I_B_by_iso.sum())
 
 
-    read_isoform_counts = (g[['Read', 'Isoform']].drop_duplicates()
+    read_isoform_counts = (g_pool[['Read', 'Isoform']].drop_duplicates()
                           .groupby('Read', sort=False)['Isoform']
                           .agg(lambda values: tuple(sorted(values))).value_counts())
 
@@ -746,6 +753,8 @@ class Downstream:
         self.gsi_path = None
         self.scotch_gtf_path = None
         self._sample_gtf_junction_index = None
+        self._sample_gtf_transcript_exons = None
+        self._sample_gtf_genes_named = None
         self._sample_gtf_junction_index_path = None
 
         self.sample_configs = self._build_sample_configs()
@@ -872,6 +881,21 @@ class Downstream:
                 gene_snv_frames.append(gene_snv_df)
 
 
+                if getattr(self, '_event_pool_stats', None) is None:
+                    self._event_pool_stats = {'gtf_filtered': 0, 'gtf_unfiltered': 0, 'wnovel_pkl': 0,
+                                              'updated_pkl': 0, 'gtf_no_exons': 0, 'novel_isoforms': 0}
+                    self._load_gtf_junction_index()
+                    if getattr(self, '_sample_gtf_transcript_exons', None):
+                        _src = (f'SCOTCH GTF, {self.scotch_gtf_kind} ({self.scotch_gtf_path}): every transcript '
+                                f'in it, known and novel, exons and junctions as the GTF gives them')
+                    elif getattr(self, 'novel_gsi_path', None):
+                        _src = (f'wNovel pickle ({self.novel_gsi_path}): reference + novel transcripts over '
+                                f'its exon blocks (no SCOTCH GTF found)')
+                    else:
+                        _src = ('updated pickle sub-exons: reference transcripts only, NO novel junctions '
+                                '(no SCOTCH GTF and no wNovel pickle found)')
+                    self._log(f'[decided] event_pool={_src}; per-gene fallback: filtered GTF -> unfiltered GTF '
+                              f'-> wNovel pickle -> updated pickle, counts logged after Task 4a')
                 self._log('  Task 4a: Haplotype–event associations...')
                 _t0 = time.perf_counter()
                 hap_event_df = self._haplotype_event_associations(
@@ -884,6 +908,13 @@ class Downstream:
                     event_mode=event_mode,
                     fdr_events_value=fdr_events_value)
                 self._log(f'  Task 4a done in {time.perf_counter() - _t0:.1f}s')
+                _eps = getattr(self, '_event_pool_stats', None)
+                if _eps and not _eps.get('reported'):
+                    self._log(f"  event pool by source: filtered GTF {_eps.get('gtf_filtered', 0)} genes, "
+                              f"unfiltered GTF {_eps.get('gtf_unfiltered', 0)}, wNovel pickle {_eps.get('wnovel_pkl', 0)}, "
+                              f"updated pickle {_eps.get('updated_pkl', 0)}, in GTF without exons {_eps.get('gtf_no_exons', 0)}; "
+                              f"{_eps['novel_isoforms']} transcripts absent from the updated pickle (novel)")
+                    _eps['reported'] = True
                 if hap_event_df is None or hap_event_df.empty:
                     self._log('  No haplotype–event associations found; skipping Tasks 4b/4c.')
                     continue
@@ -1513,8 +1544,6 @@ class Downstream:
         ).round(4)
 
 
-        ct_rows['es_ase'] = ct_rows['es_ase_cons']
-
         astu = self._compute_astu_effect(
             ct_rows[['geneID', 'gene_major_hap']].copy(),
             cell_type=cell_type
@@ -1530,12 +1559,9 @@ class Downstream:
             ct_rows['overall_dominant_frac_hap_major'] = np.nan
             ct_rows['overall_dominant_frac_hap_minor'] = np.nan
             ct_rows['overall_dominant_pref_hap'] = np.nan
-            ct_rows['es_astu'] = np.nan
+            ct_rows['es_astu_point'] = np.nan
             ct_rows['es_astu_cons'] = np.nan
             ct_rows['astu_source'] = np.nan
-
-
-        ct_rows['es_astu_point'] = ct_rows['es_astu']
 
 
         astu_conf = self._compute_conf_astu(
@@ -1590,8 +1616,8 @@ class Downstream:
             'isoform_p_value', 'isoform_p_value_high', 'isoform_p_value_low',
             'isoform_p_value_adj', 'isoform_p_value_adj_high', 'isoform_p_value_adj_low',
             'shrinkage_k',
-            'es_ase_point', 'es_ase_cons', 'es_ase',
-            'es_astu_point', 'es_astu_cons', 'es_astu', 'astu_source',
+            'es_ase_point', 'es_ase_cons',
+            'es_astu_point', 'es_astu_cons', 'astu_source',
             'conf_astu',
             'overall_dominant_pref_hap'
         ]
@@ -1617,11 +1643,13 @@ class Downstream:
             '+',
             '-'
         )
-        ase_mask = major_mask & result['es_ase'].notna()
+
+
+        ase_mask = major_mask & result['es_ase_cons'].notna()
         result.loc[ase_mask, 'snv_es_ase_signed'] = np.where(
             result.loc[ase_mask, 'snv_hap'] == result.loc[ase_mask, 'gene_major_hap'],
-            result.loc[ase_mask, 'es_ase'],
-            -result.loc[ase_mask, 'es_ase']
+            result.loc[ase_mask, 'es_ase_cons'],
+            -result.loc[ase_mask, 'es_ase_cons']
         )
 
         dom_mask = result['overall_dominant_pref_hap'].isin(['A', 'B'])
@@ -1630,11 +1658,11 @@ class Downstream:
             '+',
             '-'
         )
-        astu_mask = dom_mask & result['es_astu'].notna()
+        astu_mask = dom_mask & result['es_astu_point'].notna()
         result.loc[astu_mask, 'snv_es_astu_signed'] = np.where(
             result.loc[astu_mask, 'snv_hap'] == result.loc[astu_mask, 'overall_dominant_pref_hap'],
-            result.loc[astu_mask, 'es_astu'],
-            -result.loc[astu_mask, 'es_astu']
+            result.loc[astu_mask, 'es_astu_point'],
+            -result.loc[astu_mask, 'es_astu_point']
         )
 
         return result
@@ -1930,7 +1958,7 @@ class Downstream:
                     'overall_dominant_frac_hap_major': np.nan,
                     'overall_dominant_frac_hap_minor': np.nan,
                     'overall_dominant_pref_hap': np.nan,
-                    'es_astu': np.nan,
+                    'es_astu_point': np.nan,
                     'es_astu_cons': np.nan,
                     'astu_source': astu_source,
                 })
@@ -2010,7 +2038,7 @@ class Downstream:
                 'overall_dominant_frac_hap_major': round(float(dom_frac_major), 4),
                 'overall_dominant_frac_hap_minor': round(float(dom_frac_minor), 4),
                 'overall_dominant_pref_hap': overall_dominant_pref_hap,
-                'es_astu': round(float(es_astu), 4),
+                'es_astu_point': round(float(es_astu), 4),
                 'es_astu_cons': (round(float(es_astu_cons), 4)
                                  if pd.notna(es_astu_cons) else np.nan),
                 'astu_source': astu_source,
@@ -2118,8 +2146,8 @@ class Downstream:
             'isoform_p_value', 'isoform_p_value_high', 'isoform_p_value_low',
             'isoform_p_value_adj', 'isoform_p_value_adj_high', 'isoform_p_value_adj_low',
             'shrinkage_k',
-            'es_ase_point', 'es_ase_cons', 'es_ase',
-            'es_astu_point', 'es_astu_cons', 'es_astu',
+            'es_ase_point', 'es_ase_cons',
+            'es_astu_point', 'es_astu_cons',
             'conf_astu',
             'astu_source',
             'snvID',
@@ -2157,7 +2185,8 @@ class Downstream:
             'Sample', 'CellType',
             'geneID', 'geneName', 'geneChr',
             'n_reads', 'n_reads_phasable', 'gene_n_snvs_called',
-            'gene_major_hap', 'shrinkage_k', 'es_ase', 'es_astu',
+            'gene_major_hap', 'shrinkage_k',
+            'es_ase_point', 'es_ase_cons', 'es_astu_point', 'es_astu_cons',
             'ASE_call', 'ASTU_call',
             'overall_dominant_isoform', 'top_isoform_hap_major', 'top_isoform_hap_minor',
             'eventID',
@@ -2216,8 +2245,8 @@ class Downstream:
         if gene_snv_df is not None and not gene_snv_df.empty:
             gene_ctx = gene_snv_df[
                 ['geneID', 'n_reads', 'n_reads_phasable', 'gene_n_snvs_called',
-                 'gene_major_hap', 'shrinkage_k', 'es_ase',
-                 'es_astu', 'ASE_call', 'ASTU_call',
+                 'gene_major_hap', 'shrinkage_k', 'es_ase_point', 'es_ase_cons',
+                 'es_astu_point', 'es_astu_cons', 'ASE_call', 'ASTU_call',
                  'overall_dominant_isoform', 'top_isoform_hap_major',
                  'top_isoform_hap_minor']
             ].drop_duplicates(subset=['geneID'])
@@ -2234,8 +2263,8 @@ class Downstream:
             )
         else:
             for col in ['n_reads', 'n_reads_phasable', 'gene_n_snvs_called',
-                        'gene_major_hap', 'shrinkage_k', 'es_ase',
-                        'es_astu', 'ASE_call', 'ASTU_call',
+                        'gene_major_hap', 'shrinkage_k', 'es_ase_point', 'es_ase_cons',
+                        'es_astu_point', 'es_astu_cons', 'ASE_call', 'ASTU_call',
                         'overall_dominant_isoform', 'top_isoform_hap_major',
                         'top_isoform_hap_minor', 'snvID',
                         'snv_expr_direction', 'snv_astu_direction']:
@@ -2852,10 +2881,13 @@ class Downstream:
                     'falling back to pkl-derived junctions.'
                 )
             self._sample_gtf_junction_index = None
+            self._sample_gtf_transcript_exons = None
+            self._sample_gtf_genes_named = None
             self._sample_gtf_junction_index_path = cache_key
             return None
 
         transcript_exons_by_gene = {}
+        genes_named = set()
         exon_rows = 0
         try:
             with open(gtf_path, 'r') as handle:
@@ -2863,10 +2895,14 @@ class Downstream:
                     if not line or line[0] == '#':
                         continue
                     fields = line.rstrip('\n').split('\t', 8)
-                    if len(fields) < 9 or fields[2] != 'exon':
+                    if len(fields) < 9:
                         continue
                     attributes = fields[8]
                     gene_id = self._extract_gtf_attribute(attributes, 'gene_id')
+                    if gene_id:
+                        genes_named.add(gene_id)
+                    if fields[2] != 'exon':
+                        continue
                     transcript_id = self._extract_gtf_attribute(attributes, 'transcript_id')
                     if not gene_id or not transcript_id:
                         continue
@@ -2886,6 +2922,8 @@ class Downstream:
                 'falling back to pkl-derived junctions.'
             )
             self._sample_gtf_junction_index = None
+            self._sample_gtf_transcript_exons = None
+            self._sample_gtf_genes_named = None
             self._sample_gtf_junction_index_path = cache_key
             return None
 
@@ -2893,6 +2931,13 @@ class Downstream:
             gene_id: self._build_isoform_junction_map_from_transcript_exons(transcript_exons)
             for gene_id, transcript_exons in transcript_exons_by_gene.items()
         }
+
+
+        self._sample_gtf_transcript_exons = {
+            gene_id: {iso: {tuple(e) for e in exons} for iso, exons in transcript_exons.items()}
+            for gene_id, transcript_exons in transcript_exons_by_gene.items()
+        }
+        self._sample_gtf_genes_named = genes_named
         self._sample_gtf_junction_index_path = cache_key
         self._log(
             f'Loaded SCOTCH GTF real-junction index from {gtf_path} '
@@ -2918,18 +2963,45 @@ class Downstream:
             return None
 
         geneInfo, exon_positions, exon_isoform_dict = self.gsi[gene_id]
-        iso_exon_map, fallback_junction_map = self._build_isoform_event_maps(
-            exon_positions, exon_isoform_dict)
 
-        iso_junction_map = fallback_junction_map
+
         gtf_junction_index = self._load_gtf_junction_index()
-        if gtf_junction_index is not None:
-            gtf_iso_junction_map = gtf_junction_index.get(gene_id)
-            if gtf_iso_junction_map is not None:
-                iso_junction_map = {
-                    iso_name: set(gtf_iso_junction_map.get(iso_name, set()))
-                    for iso_name in iso_exon_map
-                }
+        gtf_transcript_exons = ((getattr(self, '_sample_gtf_transcript_exons', None) or {}).get(gene_id)
+                                if gtf_junction_index is not None else None)
+        stats = getattr(self, '_event_pool_stats', None)
+        gtf_names_gene = (gtf_junction_index is not None
+                          and gene_id in (getattr(self, '_sample_gtf_genes_named', None) or set()))
+
+
+        novel_gsi = None if gtf_transcript_exons or gtf_names_gene else self._get_novel_gsi()
+        if gtf_transcript_exons:
+            iso_exon_map = {iso: set(exons) for iso, exons in gtf_transcript_exons.items() if exons}
+            gtf_iso_junction_map = gtf_junction_index.get(gene_id, {})
+            iso_junction_map = {iso: set(gtf_iso_junction_map.get(iso, set())) for iso in iso_exon_map}
+            if stats is not None:
+                key = 'gtf_unfiltered' if getattr(self, 'scotch_gtf_kind', None) == 'unfiltered' else 'gtf_filtered'
+                stats[key] = stats.get(key, 0) + 1
+                stats['novel_isoforms'] += sum(1 for iso in iso_exon_map
+                                               if iso not in (exon_isoform_dict or {}))
+        elif gtf_names_gene:
+
+
+            iso_exon_map, iso_junction_map = {}, {}
+            self._log(f'  event pool: {gene_id} is in the SCOTCH GTF without exon rows; no events')
+            if stats is not None:
+                stats['gtf_no_exons'] = stats.get('gtf_no_exons', 0) + 1
+        elif novel_gsi is not None and gene_id in novel_gsi:
+            _, novel_exons, novel_isoforms = novel_gsi[gene_id]
+            iso_exon_map, iso_junction_map = self._build_isoform_event_maps(novel_exons, novel_isoforms)
+            if stats is not None:
+                stats['wnovel_pkl'] = stats.get('wnovel_pkl', 0) + 1
+                stats['novel_isoforms'] += sum(1 for iso in iso_exon_map
+                                               if iso not in (exon_isoform_dict or {}))
+        else:
+            iso_exon_map, iso_junction_map = self._build_isoform_event_maps(
+                exon_positions, exon_isoform_dict)
+            if stats is not None:
+                stats['updated_pkl'] = stats.get('updated_pkl', 0) + 1
 
         all_exons = sorted({e for s in iso_exon_map.values() for e in s
                             if e[1] - e[0] >= 5})
@@ -3159,18 +3231,104 @@ class Downstream:
                 if gid in relevant_genes
             }
         else:
-            scotch_by_gene = {
-                gid: sub.groupby('Read')['Isoform'].apply(list).to_dict()
-                for gid, sub in scotch_df.groupby('geneID')
-            }
+
+
+            scotch_by_gene = {}
+            for gid, sub in scotch_df.groupby('geneID'):
+                d = {}
+                for read_name, iso in zip(sub['Read'].to_numpy(), sub['Isoform'].to_numpy()):
+                    d.setdefault(read_name, []).append(iso)
+                scotch_by_gene[gid] = d
 
         bam_handles = {}
 
-        result_rows = []
+
+        event_universe = {}
+        for (gid, et, es, ee), _ in snv_event_df.groupby(
+                ['geneID', 'event_type', 'event_start', 'event_end'], sort=True):
+            event_universe.setdefault((gid, et), []).append((int(es), int(ee)))
+        membership_cache = {}
+
+        def _membership(gene_id, ev_type, event_set_map, iso_lookup):
+            key = (gene_id, ev_type)
+            if key in membership_cache:
+                return membership_cache[key]
+            events = event_universe.get(key, [])
+            event_pos = {ev: j for j, ev in enumerate(events)}
+            read_pos = {}
+            n_reads = len(iso_lookup)
+            present = np.zeros((n_reads, len(events)), dtype=bool)
+            valid = np.zeros((n_reads, len(events)), dtype=bool)
+            iso_vec = {}
+            for i, (read_name, isos) in enumerate(iso_lookup.items()):
+                read_pos[read_name] = i
+                if not isos:
+                    continue
+                if any(iso not in event_set_map for iso in isos):
+                    continue
+                vecs = []
+                for iso in isos:
+                    v = iso_vec.get(iso)
+                    if v is None:
+                        members = event_set_map.get(iso, set())
+                        v = np.fromiter((ev in members for ev in events), dtype=bool, count=len(events))
+                        iso_vec[iso] = v
+                    vecs.append(v)
+                if len(vecs) == 1:
+                    present[i] = vecs[0]
+                    valid[i] = True
+                else:
+                    stack = np.vstack(vecs)
+                    present[i] = stack[0]
+                    valid[i] = (stack == stack[0]).all(axis=0)
+            out = (event_pos, read_pos, present, valid)
+            membership_cache[key] = out
+            return out
+
+        mask_cache = {}
+
+        def _allele_masks(cache_key, read_alleles, read_pos, ref_base, alt_base):
+            key = (cache_key, ref_base, alt_base)
+            if key in mask_cache:
+                return mask_cache[key]
+            ref_mask = np.zeros(len(read_pos), dtype=bool)
+            alt_mask = np.zeros(len(read_pos), dtype=bool)
+            n_ref_all = n_alt_all = 0
+            for read_name, allele in read_alleles.items():
+                if allele == alt_base:
+                    n_alt_all += 1
+                    i = read_pos.get(read_name)
+                    if i is not None:
+                        alt_mask[i] = True
+                elif allele == ref_base:
+                    n_ref_all += 1
+                    i = read_pos.get(read_name)
+                    if i is not None:
+                        ref_mask[i] = True
+            out = (ref_mask, alt_mask, n_ref_all, n_alt_all)
+            mask_cache[key] = out
+            return out
+
         group_keys = ['geneID', 'event_type', 'event_start', 'event_end', 'snv_pos', 'snv_ref', 'snv_alt']
-        for keys, group in snv_event_df.groupby(group_keys, dropna=False):
-            gene_id, ev_type, ev_start, ev_end, snv_pos, snv_ref, snv_alt = keys
-            chrom = group.iloc[0]['chrom']
+
+
+        _codes = snv_event_df.groupby(group_keys, dropna=False).ngroup().to_numpy()
+        _order = np.argsort(_codes, kind='stable')
+        _sorted = _codes[_order]
+        _starts = np.flatnonzero(np.r_[True, _sorted[1:] != _sorted[:-1]]) if len(_sorted) else np.zeros(0, int)
+        group_sizes = np.diff(np.r_[_starts, len(_sorted)]) if len(_sorted) else np.zeros(0, int)
+        _first = _order[_starts]
+        _key_cols = {c: snv_event_df[c].to_numpy()[_first] for c in group_keys + ['chrom']}
+        row_order = _order
+        chi2_jobs = []
+        col_values = {c: [] for c in ('raw_ref_present', 'raw_ref_absent', 'raw_alt_present',
+                                      'raw_alt_absent', 'raw_chi2', 'raw_p_value', 'raw_test_type')}
+        for gi in range(len(_first)):
+            gene_id, ev_type, ev_start, ev_end, snv_pos, snv_ref, snv_alt = (
+                _key_cols['geneID'][gi], _key_cols['event_type'][gi], _key_cols['event_start'][gi],
+                _key_cols['event_end'][gi], _key_cols['snv_pos'][gi], _key_cols['snv_ref'][gi],
+                _key_cols['snv_alt'][gi])
+            chrom = _key_cols['chrom'][gi]
 
             extra = dict(raw_ref_present=None, raw_ref_absent=None,
                          raw_alt_present=None, raw_alt_absent=None,
@@ -3179,7 +3337,8 @@ class Downstream:
 
             alt_base = str(snv_alt).upper()
             if pd.isna(snv_alt) or alt_base not in {'A', 'C', 'G', 'T'}:
-                result_rows.append(group.assign(**extra))
+                for c, v in extra.items():
+                    col_values[c].append(v)
                 continue
 
 
@@ -3237,36 +3396,23 @@ class Downstream:
                     }
 
                 ref_base = str(snv_ref).upper()
-                rp = ra = ap = aa = 0
-                for read_name, allele in read_alleles.items():
-                    if intra_event:
+                event_pos, read_pos, present, valid = _membership(
+                    gene_id, ev_type, event_set_map, iso_lookup)
+                ref_mask, alt_mask, n_ref_all, n_alt_all = _allele_masks(
+                    cache_key, read_alleles, read_pos, ref_base, alt_base)
+                if intra_event:
 
 
-                        if allele == alt_base:
-                            ap += 1
-                        elif allele == ref_base:
-                            rp += 1
-                    else:
-                        isos = iso_lookup.get(read_name)
-                        if not isos:
-                            continue
-
-
-                        memberships = {event_tuple in event_set_map.get(iso, set())
-                                       for iso in isos}
-                        if len(memberships) != 1:
-                            continue
-                        present = memberships.pop()
-                        if allele == alt_base:
-                            if present:
-                                ap += 1
-                            else:
-                                aa += 1
-                        elif allele == ref_base:
-                            if present:
-                                rp += 1
-                            else:
-                                ra += 1
+                    rp, ap, ra, aa = n_ref_all, n_alt_all, 0, 0
+                else:
+                    j = event_pos[event_tuple]
+                    ok = valid[:, j]
+                    pres = present[:, j] & ok
+                    absn = ~present[:, j] & ok
+                    rp = int(np.count_nonzero(ref_mask & pres))
+                    ra = int(np.count_nonzero(ref_mask & absn))
+                    ap = int(np.count_nonzero(alt_mask & pres))
+                    aa = int(np.count_nonzero(alt_mask & absn))
 
                 if (not intra_event and read_alleles
                         and rp == 0 and ra == 0 and ap == 0 and aa == 0):
@@ -3297,10 +3443,7 @@ class Downstream:
                     test_type = 'chi2_cross_event'
                     table = np.array([[rp, ra], [ap, aa]])
                     if table.sum() >= 10 and not ((table.sum(axis=0) == 0).any() or (table.sum(axis=1) == 0).any()):
-                        try:
-                            chi2_val, p_val, _, _ = chi2_contingency(table, correction=False)
-                        except Exception:
-                            pass
+                        chi2_jobs.append((gi, rp, ra, ap, aa))
 
                 extra = dict(
                     raw_ref_present=rp, raw_ref_absent=ra,
@@ -3310,7 +3453,25 @@ class Downstream:
                     raw_test_type=test_type,
                 )
 
-            result_rows.append(group.assign(**extra))
+            for c, v in extra.items():
+                col_values[c].append(v)
+
+        if chi2_jobs:
+
+
+            jobs = np.asarray(chi2_jobs, dtype=float)
+            tabs = jobs[:, 1:].reshape(-1, 2, 2)
+            rs = tabs.sum(axis=2, keepdims=True)
+            cs = tabs.sum(axis=1, keepdims=True)
+            tot = tabs.sum(axis=(1, 2), keepdims=True)
+            expected = rs * cs / tot
+            stat = ((tabs - expected) ** 2 / expected).sum(axis=(1, 2))
+            pvals = _chi2_dist.sf(stat, 1)
+            for (gi, *_), st_, pv in zip(chi2_jobs, stat, pvals):
+
+
+                col_values['raw_chi2'][gi] = round(np.float64(st_), 4)
+                col_values['raw_p_value'][gi] = float(pv)
 
         for bam in bam_handles.values():
             if bam is not None:
@@ -3318,7 +3479,30 @@ class Downstream:
                     bam.close()
                 except (OSError, ValueError):
                     pass
-        combined = pd.concat(result_rows, ignore_index=True) if result_rows else snv_event_df
+        if len(row_order):
+            combined = snv_event_df.iloc[row_order].reset_index(drop=True)
+            sizes = np.asarray(group_sizes)
+            for c, vals in col_values.items():
+
+
+                kinds = {}
+                for v in vals:
+                    kinds.setdefault('none' if v is None else type(v).__name__, v)
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', FutureWarning)
+                    probe = pd.concat([pd.DataFrame({'x': [v]}) for v in kinds.values()],
+                                      ignore_index=True)['x'].dtype
+                expanded = [v for v, n in zip(vals, sizes) for _ in range(int(n))]
+                if probe.kind == 'f':
+                    combined[c] = np.array([np.nan if v is None else float(v) for v in expanded], dtype=float)
+                elif probe.kind in 'iu':
+                    combined[c] = np.array(expanded, dtype=np.int64)
+                elif probe.kind == 'b':
+                    combined[c] = np.array(expanded, dtype=bool)
+                else:
+                    combined[c] = pd.Series(expanded, index=combined.index, dtype=probe)
+        else:
+            combined = snv_event_df
 
 
         if not combined.empty and 'raw_p_value' in combined.columns:
@@ -3446,25 +3630,37 @@ class Downstream:
 
     def _resolve_scotch_gtf_path(self, scotch_target, sample_name=None):
         ref_dir = os.path.join(scotch_target, 'reference')
-        exact = os.path.join(ref_dir, 'SCOTCH_updated_annotation_filtered.gtf')
-        if os.path.isfile(exact):
-            return exact
         if not os.path.isdir(ref_dir):
-            return None
+            return None, None
+        label = f' for sample {sample_name}' if sample_name else ''
+        exact = os.path.join(ref_dir, 'SCOTCH_updated_annotation_filtered.gtf')
         matches = sorted(
             os.path.join(ref_dir, name)
             for name in os.listdir(ref_dir)
             if name.startswith('SCOTCH_updated_annotation_filtered') and name.endswith('.gtf')
         )
-        if not matches:
-            return None
         if len(matches) > 1:
-            label = f' for sample {sample_name}' if sample_name else ''
-            self._log(
-                f'Multiple SCOTCH GTF files found{label} in {ref_dir}; '
-                f'using {os.path.basename(matches[0])}.'
-            )
-        return matches[0]
+            raise ValueError(
+                f'{len(matches)} filtered SCOTCH GTFs{label} in {ref_dir}: '
+                f'{", ".join(os.path.basename(m) for m in matches)}. The event pool must come from '
+                f'one of them; remove or rename the stale one(s) before running step5.')
+        if matches:
+            return matches[0], 'filtered'
+        if os.path.isfile(exact):
+            return exact, 'filtered'
+        unfiltered = os.path.join(ref_dir, 'SCOTCH_updated_annotation.gtf')
+        if os.path.isfile(unfiltered):
+            return unfiltered, 'unfiltered'
+        return None, None
+
+    @staticmethod
+    def _resolve_novel_pickle_path(scotch_target):
+        ref_dir = os.path.join(scotch_target, 'reference')
+        for name in ('metageneStructureInformationwNovel.pkl', 'metageneStructureInformationwnovel.pkl'):
+            path = os.path.join(ref_dir, name)
+            if os.path.isfile(path):
+                return path
+        return None
 
     def _load_gene_structure_information(self, gsi_path):
         if not gsi_path:
@@ -3515,6 +3711,7 @@ class Downstream:
                                      else os.path.join(self.output_folder, sample_name, 'downstream'))
 
             scotch_tsv_path = resolve_scotch_auxiliary_tsv(scotch_target, self.sample_name_parse or None)
+            _gtf_path, _gtf_kind = self._resolve_scotch_gtf_path(scotch_target, sample_name=sample_name)
 
             configs.append({
                 'sample_name': sample_name,
@@ -3535,8 +3732,9 @@ class Downstream:
                 'downstream_output': downstream_output,
                 'scotch_tsv_path': scotch_tsv_path,
                 'gsi_path': self._resolve_reference_pickle_path(),
-                'scotch_gtf_path': self._resolve_scotch_gtf_path(
-                    scotch_target, sample_name=sample_name),
+                'scotch_gtf_path': _gtf_path,
+                'scotch_gtf_kind': _gtf_kind,
+                'novel_gsi_path': self._resolve_novel_pickle_path(scotch_target),
                 'bam_path': None if self.bam_paths is None else self.bam_paths[idx],
             })
         return configs
@@ -3561,6 +3759,11 @@ class Downstream:
         self.scotch_tsv_path = cfg['scotch_tsv_path']
         self.gsi_path = cfg['gsi_path']
         self.scotch_gtf_path = cfg['scotch_gtf_path']
+        self.scotch_gtf_kind = cfg.get('scotch_gtf_kind')
+        prev_novel_path = getattr(self, 'novel_gsi_path', None)
+        self.novel_gsi_path = cfg.get('novel_gsi_path')
+        if self.novel_gsi_path != prev_novel_path:
+            self._novel_gsi = None
         self.bam_path = cfg['bam_path']
         self.cell_type_df = (None if self.cell_type_df_list is None
                              else self.cell_type_df_list[sample_idx])
@@ -3570,7 +3773,33 @@ class Downstream:
             self.meta = self.gsi
         if self.scotch_gtf_path != prev_gtf_path:
             self._sample_gtf_junction_index = None
+            self._sample_gtf_transcript_exons = None
+            self._sample_gtf_genes_named = None
             self._sample_gtf_junction_index_path = None
+        self._event_pool_stats = None
+        self._gene_event_map_cache = {}
+
+    def _get_novel_gsi(self):
+        if getattr(self, '_novel_gsi', None) is not None:
+            return self._novel_gsi or None
+        path = getattr(self, 'novel_gsi_path', None)
+        if not path:
+            self._novel_gsi = {}
+            return None
+        raw = load_pickle(path)
+        flat = {}
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                entries = value if isinstance(value, list) else [value]
+                for entry in entries:
+                    try:
+                        gene_info, exon_info, isoform_info = entry
+                        flat[gene_info['geneID']] = (gene_info, exon_info, isoform_info)
+                    except (TypeError, ValueError, KeyError):
+                        continue
+        self._novel_gsi = flat
+        self._log(f'Loaded novel-isoform pickle {os.path.basename(path)}: {len(flat)} genes')
+        return flat or None
 
     def _log(self, msg):
         sample_name = getattr(self, '_log_sample_name', None)
